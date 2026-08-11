@@ -1,4 +1,4 @@
-"""a207-lis-mcp 自测入口。
+"""CKDNutri-clinical-data-mcp（P1，由 a207-his-mcp + a207-lis-mcp 合并而来）自测入口。
 
 直接 import core 断言，不依赖 fastmcp、不依赖 pytest。
 运行：python tests/test_tools.py

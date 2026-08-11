@@ -11,8 +11,8 @@ import sys
 from a207_policy import CallerUnknown, as_caller
 from harness import PKG_ROOT, SRC, check
 
-from a207_lis_mcp import core, store
-from a207_lis_mcp.reference import ANALYTES, reference_interval
+from CKDNutri_clinical_data_mcp import core, store
+from CKDNutri_clinical_data_mcp.reference import ANALYTES, reference_interval
 
 DENIED_WRITERS = ("parent_assistant", "nutritionist", "child_companion",
                   "risk_warning", "orchestrator", "unknown_agent")
@@ -196,7 +196,7 @@ def _caller_fail_closed():
 
 @check("P0-1 身份来源唯一：server 工具签名不得暴露 caller 形参")
 def _server_no_caller_param():
-    tree = ast.parse((SRC / "a207_lis_mcp" / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((SRC / "CKDNutri_clinical_data_mcp" / "server.py").read_text(encoding="utf-8"))
     offenders = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -229,7 +229,8 @@ def _no_fastmcp():
     offenders = [
         name
         for name in pure
-        if pattern.search((SRC / "a207_lis_mcp" / name).read_text(encoding="utf-8"))
+        if (SRC / "CKDNutri_clinical_data_mcp" / name).exists()
+        and pattern.search((SRC / "CKDNutri_clinical_data_mcp" / name).read_text(encoding="utf-8"))
     ]
     assert not offenders, f"纯逻辑层引入了 fastmcp：{offenders}"
     assert "fastmcp" not in sys.modules, "测试进程意外加载了 fastmcp"

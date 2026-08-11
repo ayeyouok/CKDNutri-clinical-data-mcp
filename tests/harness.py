@@ -28,14 +28,15 @@ if str(SRC) not in sys.path:
 # P0-1：模拟部署侧注入身份。缺失即 fail-closed，故测试必须显式注入。
 os.environ.setdefault("A207_CALLER", "doctor_assistant")
 
-from a207_lis_mcp import store  # noqa: E402
+from CKDNutri_clinical_data_mcp import store  # noqa: E402
 
-DEFAULT_DIR = store.data_dir()
-assert (DEFAULT_DIR / "labs.json").exists(), f"基线数据缺失：{DEFAULT_DIR}"
-
-TMP_DIR = Path(tempfile.mkdtemp(prefix="a207-lis-test-"))
-shutil.copy2(DEFAULT_DIR / "labs.json", TMP_DIR / "labs.json")
+# 基线数据随包内联（_labs_baseline.BASELINE），任意部署环境自包含加载，无需 labs.json 文件；
+# 写操作隔离到临时目录（A207_LIS_DATA_DIR），不污染仓库产物。
+ds = store.load_dataset()
+assert ds.get("patients"), "内联基线数据缺失：load_dataset 返回空"
+TMP_DIR = Path(tempfile.mkdtemp(prefix="a207-clinical-test-"))
 os.environ["A207_LIS_DATA_DIR"] = str(TMP_DIR)
+os.environ["A207_GUARDIAN_TOKEN_DIR"] = str(TMP_DIR)
 store.load_dataset(refresh=True)
 
 RESULTS: list[tuple[str, bool, str]] = []

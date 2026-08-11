@@ -8,8 +8,16 @@ from a207_policy import as_caller
 
 from harness import check, numeric_leak
 
-from a207_lis_mcp import core, store
-from a207_lis_mcp.reference import PARENT_VIEW_ANALYTES
+from CKDNutri_clinical_data_mcp import core, his, store
+from CKDNutri_clinical_data_mcp.reference import PARENT_VIEW_ANALYTES
+
+
+def _parent_token(patient_id: str) -> str:
+    """以医生助手身份为患儿签发监护人令牌（F4：家长受限视图须凭令牌核验）。"""
+    with as_caller("doctor_assistant"):
+        issued = his.issue_guardian_token(patient_id)
+    assert issued["ok"], issued
+    return issued["data"]["guardian_token"]
 
 
 @check("数据集覆盖 >=30 例且 patient_id 合规")
@@ -102,8 +110,9 @@ def _labs_denied():
 
 @check("get_labs / parent_assistant 受限视图不含任何原始数值")
 def _labs_parent():
+    tok = _parent_token("P0013")
     with as_caller("parent_assistant"):
-        res = core.get_labs("P0013")
+        res = core.get_labs("P0013", guardian_token=tok)
     assert res["ok"] is True, res
     data = res["data"]
     assert data["data_scope"] == "limited_parent"
@@ -118,8 +127,9 @@ def _labs_parent():
 
 @check("get_labs / 受限视图对危急例标红但仍不给数值")
 def _parent_critical():
+    tok = _parent_token("P0028")
     with as_caller("parent_assistant"):
-        res = core.get_labs("P0028")
+        res = core.get_labs("P0028", guardian_token=tok)
     assert res["ok"] is True
     assert res["data"]["has_critical"] is True, res["data"]
     assert not numeric_leak(res["data"]), "危急场景下受限视图泄露了数值"
