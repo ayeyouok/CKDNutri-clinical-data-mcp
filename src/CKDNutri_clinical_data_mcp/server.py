@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from fastmcp import FastMCP
 
-from a207_policy import CallerError
+from ._policy import CallerError
 
 from .core import (
     get_critical_values,
