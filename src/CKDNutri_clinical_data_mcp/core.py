@@ -23,6 +23,7 @@ from a207_policy import (
 from .errors import fail, forbidden, invalid, no_data, not_found, patient_context
 from .models import LabResultIn, PatientQuery, TrendQuery, UpsertRequest
 from .his import (
+    _guard_access,
     _guard_guardian,
     get_diagnosis,
     get_nutrition_ceiling,
@@ -59,9 +60,10 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
     except ValidationError as exc:
         return invalid(exc)
 
-    if caller not in READ_FULL and caller not in READ_LIMITED:
-        return forbidden(caller, "get_labs")
-
+    # F2：通用读权统一走中枢 a207_policy.enforce_read（单一事实源）
+    denied = _guard_access("get_labs")
+    if denied:
+        return denied
     # F4：家长受限视图必须经监护人令牌绑定核验；缺 token / 不匹配即拒绝，不给降级视图
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_labs")
     if denied:
@@ -233,8 +235,10 @@ def upsert_lab_result(
     成功返回 recommend_reevaluate=true，提示编排层强制触发 M8 重评。
     """
     caller = get_caller()
-    if caller not in WRITE_ALLOWED:
-        return forbidden(caller, "upsert_lab_result")
+    # F2：写权统一走中枢 a207_policy.enforce_write（含 MX-3 写工具白名单），较本地 WRITE_ALLOWED 更严
+    denied = _guard_access("upsert_lab_result", write=True)
+    if denied:
+        return denied
 
     try:
         request = UpsertRequest(
@@ -292,7 +296,8 @@ def list_known_patients() -> dict[str, Any]:
     此前该 core 函数既无 caller 也无闸门，直接调用可绕过 server 层 gate。
     """
     caller = get_caller()
-    if caller not in READ_FULL and caller not in READ_LIMITED:
-        return forbidden(caller, "list_known_patients")
+    denied = _guard_access("list_known_patients")
+    if denied:
+        return denied
     ids = known_patient_ids()
     return {"ok": True, "data": {"count": len(ids), "patient_ids": ids}}

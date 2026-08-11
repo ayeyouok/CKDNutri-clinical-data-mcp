@@ -21,13 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from a207_policy import (
+    CLINICIAN_ONLY_FIELDS,
     HIS_ALLOWED_FILTER_KEYS,
-    HIS_BLOCKED,
     HIS_COHORT,
-    HIS_FULL_VIEW,
-    HIS_LIMITED,
-    HIS_READ,
+    P1_PARENT_HIDDEN_FIELDS,
+    PermissionDenied,
     atomic_write_json,
+    enforce_read,
+    enforce_write,
     get_caller,
     resolve_state_path,
 )
@@ -36,16 +37,57 @@ DEFAULT_DATA_FILE = Path(__file__).resolve().parent / "data" / "patients.json"
 DATA_FILE_ENV = "A207_HIS_DATA_FILE"
 PATIENT_ID_PATTERN = re.compile(r"^P[0-9]{4,}$")
 
-# 放行集合唯一事实源在 a207_policy.matrix（P1-1）；此处仅保留本地别名，下文逻辑零改动。
-# 与需求文档 §7 权限矩阵一致：M1 HIS 对 调度/医生/风险预警 为 R，营养师/家长助手为 RL，患儿伙伴禁止
-FULL_VIEW_CALLERS: frozenset[str] = HIS_FULL_VIEW
-LIMITED_CALLERS: frozenset[str] = HIS_LIMITED
-READ_CALLERS: frozenset[str] = HIS_READ
-# MX-2 游戏化隔离：患儿伙伴不得触达任何医疗数据
-BLOCKED_CALLERS: frozenset[str] = HIS_BLOCKED
-# 队列检索属于跨患者操作，家长助手仅能访问被绑定的单个患儿，故不在允许集合内
+# F2（v2.3）：通用角色闸统一走 a207_policy.enforce_read / enforce_write 中枢（单一事实源），
+# 不再本地维护 caller not in X 的白/黑名单。家长 guardian_token 闸由 _guard_guardian 独立负责（F1/F4）。
+# 跨患者队列检索（list_patients）在中枢读权之上再叠加 M1 专属 cohort 限制（仅临床/风险身份）。
 COHORT_CALLERS: frozenset[str] = HIS_COHORT
 ALLOWED_FILTER_KEYS: frozenset[str] = HIS_ALLOWED_FILTER_KEYS
+
+_MCP_NAME = "CKDNutri-clinical-data-mcp"
+
+
+def _guard_access(tool: str, *, write: bool = False) -> dict[str, Any] | None:
+    """通用角色闸：统一走中枢 a207_policy.enforce_read / enforce_write（单一事实源）。
+
+    放行返回 None；越权抛 PermissionDenied，此处转成 P1 既有 FORBIDDEN 信封（契约不变）。
+    家长 guardian_token 核验由 _guard_guardian 独立负责，本函数不处理。
+    """
+    try:
+        if write:
+            enforce_write(_MCP_NAME, tool)
+        else:
+            enforce_read(_MCP_NAME)
+    except PermissionDenied as exc:
+        return _err("FORBIDDEN",
+                    f"caller={exc.caller} 无权访问 {tool}：{exc.reason}")
+    return None
+
+
+# F3（v2.3）：家长脱敏基准统一到 a207_policy 单一事实源。
+# 必剥集合 = 全系统医生专有叶子字段(CLINICIAN_ONLY_FIELDS) ∪ P1 专有聚合块(P1_PARENT_HIDDEN_FIELDS)。
+# nutrition_ceiling 是 P1 对家长的刻意放行（家长须知晓医生设定的摄入上限），从必剥集合剔除。
+_PARENT_HIDDEN_FIELDS = (CLINICIAN_ONLY_FIELDS | P1_PARENT_HIDDEN_FIELDS) - {"nutrition_ceiling"}
+# 家长受限视图对外声明"被隐藏"的字段（结构块 + 与之相关的两个叶子级敏感键）。
+_PARENT_WITHHELD_DOC = P1_PARENT_HIDDEN_FIELDS | {"z_score_height", "stage_confirmed_by"}
+
+
+def _strip_parent_sensitive(obj: Any, removed: set[str]) -> Any:
+    """递归剥除家长不可见的敏感键（F3 单一事实源）。
+
+    遍历 dict/list，凡是键名落在 _PARENT_HIDDEN_FIELDS 的逐项移除并记录，确保未来新增的敏感字段
+    也会自动从家长视图剥离，不再依赖手写白名单（杜绝双轨漂移）。
+    """
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            if k in _PARENT_HIDDEN_FIELDS:
+                removed.add(k)
+            else:
+                out[k] = _strip_parent_sensitive(v, removed)
+        return out
+    if isinstance(obj, list):
+        return [_strip_parent_sensitive(v, removed) for v in obj]
+    return obj
 
 # --- 监护人令牌状态库（修复 F1：取代可被 patient_id 直接伪造的 "guardian_<id>" 常量）---
 # 令牌由服务端随机生成（secrets），按 patient_id 持久化到可写状态目录；
@@ -146,14 +188,6 @@ def _index() -> dict[str, Any]:
     return _CACHE["index"]
 
 
-def _guard_read(caller: str, tool: str) -> dict[str, Any] | None:
-    if caller in BLOCKED_CALLERS:
-        return _err("FORBIDDEN", f"caller={caller} not allowed for {tool}（MX-2 游戏化隔离）")
-    if caller not in READ_CALLERS:
-        return _err("FORBIDDEN", f"caller={caller} not allowed for {tool}（未登记的调用方）")
-    return None
-
-
 def _guard_guardian(caller: str, patient_id: str, guardian_token: str | None,
                     tool: str) -> dict[str, Any] | None:
     """家长助手每次读取前必须通过绑定核验，缺 token 即拒绝，不给降级视图。"""
@@ -227,7 +261,7 @@ def get_patient_profile(patient_id: str,
                         guardian_token: str | None = None) -> dict[str, Any]:
     """人口学 + 诊断 + 过敏史 + 医生营养上限。视图随 caller 收窄。"""
     caller = get_caller()
-    denied = _guard_read(caller, "get_patient_profile")
+    denied = _guard_access("get_patient_profile")
     if denied:
         return denied
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_patient_profile")
@@ -256,14 +290,19 @@ def get_patient_profile(patient_id: str,
         data["food_diary_5d"] = p["food_diary_5d"]
         data["biochemistry"] = p["biochemistry"]
     elif scope == "limited_nutritionist":
+        # 退役角色分支（营养评估已并入 P2）：保留逻辑，脱敏基准同家长视图引用中央集合
         data["dialysis_detail"] = p["dialysis_detail"]
         data["food_diary_5d"] = p["food_diary_5d"]
-        data["withheld"] = ["biochemistry", "medical_record_no"]
+        data["withheld"] = sorted(P1_PARENT_HIDDEN_FIELDS & {"biochemistry", "medical_record_no"})
         data["withheld_reason"] = "营养师无 M2 LIS 读权，生化数据不经 M1 旁路下发"
     else:
-        data["withheld"] = ["biochemistry", "food_diary_5d", "dialysis_detail",
-                            "medical_record_no", "z_score_height"]
-        data["withheld_reason"] = "家长受限视图仅含诊断、过敏与医生设定上限"
+        # 家长受限视图（F3）：以 a207_policy 单一事实源递归剥敏感键，withheld 声明引用中央集合
+        removed: set[str] = set()
+        data = _strip_parent_sensitive(data, removed)
+        data["withheld"] = sorted(_PARENT_WITHHELD_DOC)
+        data["withheld_reason"] = (
+            "家长受限视图仅含诊断、过敏与医生设定上限；脱敏基准见 a207_policy "
+            "CLINICIAN_ONLY_FIELDS + P1_PARENT_HIDDEN_FIELDS")
     return {"ok": True, "data": data}
 
 
@@ -271,7 +310,7 @@ def get_diagnosis(patient_id: str,
                   guardian_token: str | None = None) -> dict[str, Any]:
     """仅返回确诊分期与透析方式。营养师/家长读此接口而非复算分期。"""
     caller = get_caller()
-    denied = _guard_read(caller, "get_diagnosis")
+    denied = _guard_access("get_diagnosis")
     if denied:
         return denied
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_diagnosis")
@@ -280,16 +319,18 @@ def get_diagnosis(patient_id: str,
     p = _lookup(patient_id)
     if p is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
-    return {
-        "ok": True,
-        "data": {
-            "patient_id": p["patient_id"],
-            "data_scope": _scope_of(caller),
-            **_diagnosis_block(p),
-            "diet_restrictions": list(p["diet_restrictions"]),
-            "note": MX1_NOTE,
-        },
+    payload: dict[str, Any] = {
+        "patient_id": p["patient_id"],
+        "data_scope": _scope_of(caller),
+        **_diagnosis_block(p),
+        "diet_restrictions": list(p["diet_restrictions"]),
+        "note": MX1_NOTE,
     }
+    # F3：家长视图递归剥敏感键（如 stage_confirmed_by），与 get_patient_profile 统一基准
+    if _scope_of(caller) == "limited_parent":
+        removed: set[str] = set()
+        payload = _strip_parent_sensitive(payload, removed)
+    return {"ok": True, "data": payload}
 
 
 def verify_guardian_binding(patient_id: str, guardian_token: str) -> dict[str, Any] :
@@ -327,8 +368,12 @@ def _match(p: dict[str, Any], key: str, want: Any) -> bool:
 def list_patients(filter: dict[str, Any] | None = None) -> dict[str, Any]:
     """按 age_band / ckd_stage / dialysis 等条件筛选队列。未知筛选键直接报错，不静默忽略。"""
     caller = get_caller()
-    if caller in BLOCKED_CALLERS or caller not in COHORT_CALLERS:
-        return _err("FORBIDDEN", f"caller={caller} not allowed for list_patients")
+    denied = _guard_access("list_patients")
+    if denied:
+        return denied
+    # 跨患者队列检索在中枢读权之上再叠加 M1 cohort 限制（家长仅能访问被绑定单个患儿）
+    if caller not in COHORT_CALLERS:
+        return _err("FORBIDDEN", f"caller={caller} not allowed for list_patients（队列检索仅限临床/风险身份）")
     criteria = filter or {}
     if not isinstance(criteria, dict):
         return _err("INVALID_FILTER", "filter 必须是对象")
@@ -366,7 +411,7 @@ def get_nutrition_ceiling(patient_id: str,
                           guardian_token: str | None = None) -> dict[str, Any]:
     """医生设定的个体化摄入上限，供营养计算与食谱生成作为硬约束。"""
     caller = get_caller()
-    denied = _guard_read(caller, "get_nutrition_ceiling")
+    denied = _guard_access("get_nutrition_ceiling")
     if denied:
         return denied
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_nutrition_ceiling")
