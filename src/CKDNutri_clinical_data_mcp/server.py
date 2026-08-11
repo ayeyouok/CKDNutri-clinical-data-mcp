@@ -41,7 +41,7 @@ def main():
 
 @mcp.tool
 def get_patient_profile_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
-    """查患儿完整档案（人口学+诊断），家庭助手需 guard_token。"""
+    """查患儿完整档案（人口学+诊断），家庭助手需携带 guardian_token。"""
     try:
         return get_patient_profile(patient_id, guardian_token)
     except Exception as exc:
@@ -96,10 +96,10 @@ def get_nutrition_ceiling_tool(patient_id: str, guardian_token: str = "") -> dic
 # ---- M2: 化验面板 ----
 
 @mcp.tool
-def get_labs_tool(patient_id: str) -> dict[str, Any]:
-    """查最新化验面板（按身份视图裁剪：临床=全量，家庭=趋势方向）。"""
+def get_labs_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
+    """查最新化验面板（按身份视图裁剪：临床=全量，家庭=趋势方向）。家庭助手需携带 guardian_token。"""
     try:
-        return get_labs(patient_id)
+        return get_labs(patient_id, guardian_token)
     except Exception as exc:
         return _invalid(exc)
 

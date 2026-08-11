@@ -23,6 +23,7 @@ from a207_policy import (
 from .errors import fail, forbidden, invalid, no_data, not_found, patient_context
 from .models import LabResultIn, PatientQuery, TrendQuery, UpsertRequest
 from .his import (
+    _guard_guardian,
     get_diagnosis,
     get_nutrition_ceiling,
     get_patient_profile,
@@ -45,11 +46,12 @@ NOTIFY_HINT = "a207-notify-mcp.notify_critical_value"
 
 # --- 工具 1：get_labs -------------------------------------------------------
 
-def get_labs(patient_id: str) -> dict[str, Any]:
+def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, Any]:
     """取患者全部检验记录（按报告日期升序）。
 
     caller=parent_assistant 返回受限视图：仅最近一次 K/P/Alb/Hb 的趋势方向与
     是否在儿童参考区间内，危急项标注，不含任何原始数值。
+    caller=parent_assistant 必须经 guardian_token 绑定核验（F4），缺 token 即拒绝。
     """
     caller = get_caller()
     try:
@@ -59,6 +61,11 @@ def get_labs(patient_id: str) -> dict[str, Any]:
 
     if caller not in READ_FULL and caller not in READ_LIMITED:
         return forbidden(caller, "get_labs")
+
+    # F4：家长受限视图必须经监护人令牌绑定核验；缺 token / 不匹配即拒绝，不给降级视图
+    denied = _guard_guardian(caller, patient_id, guardian_token, "get_labs")
+    if denied:
+        return denied
 
     patient = find_patient(query.patient_id)
     if patient is None:
