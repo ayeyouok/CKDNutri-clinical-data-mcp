@@ -56,7 +56,7 @@ def _guard_access(tool: str, *, write: bool = False) -> dict[str, Any] | None:
         if write:
             enforce_write(_MCP_NAME, tool)
         else:
-            enforce_read(_MCP_NAME)
+            enforce_read(_MCP_NAME, tool)
     except PermissionDenied as exc:
         return _err("FORBIDDEN",
                     f"caller={exc.caller} 无权访问 {tool}：{exc.reason}")

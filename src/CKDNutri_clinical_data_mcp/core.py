@@ -118,6 +118,10 @@ def get_critical_values(
     except ValidationError as exc:
         return invalid(exc)
 
+    # 读权统一走中枢 a207_policy.enforce_read（单一事实源），覆盖 MCP 粒度
+    denied = _guard_access("get_critical_values")
+    if denied:
+        return denied
     if caller not in CRITICAL_CHANNEL:
         return forbidden(caller, "get_critical_values")
 
@@ -181,6 +185,10 @@ def get_lab_trend(
     except ValidationError as exc:
         return invalid(exc)
 
+    # 读权统一走中枢 a207_policy.enforce_read（单一事实源），覆盖 MCP 粒度
+    denied = _guard_access("get_lab_trend")
+    if denied:
+        return denied
     if caller not in READ_FULL:
         return forbidden(caller, "get_lab_trend")
     if query.analyte not in ANALYTES:

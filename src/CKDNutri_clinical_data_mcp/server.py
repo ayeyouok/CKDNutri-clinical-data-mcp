@@ -76,10 +76,10 @@ def issue_guardian_token_tool(patient_id: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def list_patients_tool(filters: dict) -> dict[str, Any]:
+def list_patients_tool(filter: dict = None) -> dict[str, Any]:
     """按维度筛查患者队列。仅 CKD 临床助手。"""
     try:
-        return list_patients(filters)
+        return list_patients(filter)
     except Exception as exc:
         return _invalid(exc)
 
@@ -114,10 +114,10 @@ def get_critical_values_tool(patient_id: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def get_lab_trend_tool(patient_id: str, metric: str) -> dict[str, Any]:
-    """查指定指标最近 N 次趋势。"""
+def get_lab_trend_tool(patient_id: str, analyte: str, window_days: int = None) -> dict[str, Any]:
+    """查指定指标最近 N 次趋势（可选 window_days 限制时间窗口）。"""
     try:
-        return get_lab_trend(patient_id, metric)
+        return get_lab_trend(patient_id, analyte, window_days)
     except Exception as exc:
         return _invalid(exc)
 
