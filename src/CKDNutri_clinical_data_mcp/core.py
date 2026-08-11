@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ._policy import (
+from a207_policy import (
     LIS_CRITICAL_CHANNEL,
     LIS_READ_FULL,
     LIS_READ_LIMITED,

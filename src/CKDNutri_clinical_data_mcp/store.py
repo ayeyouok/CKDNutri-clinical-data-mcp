@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from ._policy import resolve_state_path
+from a207_policy import resolve_state_path
 
 _LOCK = threading.Lock()
 _DATASET_CACHE: dict[str, Any] | None = None
