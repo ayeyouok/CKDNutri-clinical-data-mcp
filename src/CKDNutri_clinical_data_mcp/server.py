@@ -22,6 +22,7 @@ from .core import (
     upsert_lab_result,
     verify_guardian_binding,
 )
+from .his import issue_guardian_token
 
 mcp = FastMCP("CKDNutri-clinical-data-mcp")
 
@@ -48,10 +49,10 @@ def get_patient_profile_tool(patient_id: str, guardian_token: str = "") -> dict[
 
 
 @mcp.tool
-def get_diagnosis_tool(patient_id: str) -> dict[str, Any]:
-    """查确诊信息（CKD 分期/原发病/透析状态）。"""
+def get_diagnosis_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
+    """查确诊信息（CKD 分期/原发病/透析状态）。家庭助手需携带 guardian_token。"""
     try:
-        return get_diagnosis(patient_id)
+        return get_diagnosis(patient_id, guardian_token)
     except Exception as exc:
         return _invalid(exc)
 
@@ -61,6 +62,15 @@ def verify_guardian_binding_tool(patient_id: str, guardian_token: str) -> dict[s
     """验证家长令牌与患儿绑定。"""
     try:
         return verify_guardian_binding(patient_id, guardian_token)
+    except Exception as exc:
+        return _invalid(exc)
+
+
+@mcp.tool
+def issue_guardian_token_tool(patient_id: str) -> dict[str, Any]:
+    """签发监护人令牌（仅 CKD 临床助手）。生成随机令牌供家长端绑定核验，返回一次性令牌。"""
+    try:
+        return issue_guardian_token(patient_id)
     except Exception as exc:
         return _invalid(exc)
 

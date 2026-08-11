@@ -15,6 +15,8 @@ import hmac
 import json
 import os
 import re
+import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,9 @@ from a207_policy import (
     HIS_FULL_VIEW,
     HIS_LIMITED,
     HIS_READ,
+    atomic_write_json,
     get_caller,
+    resolve_state_path,
 )
 
 DEFAULT_DATA_FILE = Path(__file__).resolve().parent / "data" / "patients.json"
@@ -42,6 +46,69 @@ BLOCKED_CALLERS: frozenset[str] = HIS_BLOCKED
 # 队列检索属于跨患者操作，家长助手仅能访问被绑定的单个患儿，故不在允许集合内
 COHORT_CALLERS: frozenset[str] = HIS_COHORT
 ALLOWED_FILTER_KEYS: frozenset[str] = HIS_ALLOWED_FILTER_KEYS
+
+# --- 监护人令牌状态库（修复 F1：取代可被 patient_id 直接伪造的 "guardian_<id>" 常量）---
+# 令牌由服务端随机生成（secrets），按 patient_id 持久化到可写状态目录；
+# 仅临床角色 doctor_assistant 可签发，家长经 verify_guardian_binding 提交完成绑定核验。
+GUARDIAN_TOKEN_STORE = "guardian_tokens.json"
+GUARDIAN_TOKEN_BYTES = 32
+GUARDIAN_ISSUERS: frozenset[str] = frozenset({"doctor_assistant"})
+GUARDIAN_TOKEN_DIR_ENV = "A207_GUARDIAN_TOKEN_DIR"
+
+
+def _guardian_store_path() -> Path:
+    base = os.environ.get(GUARDIAN_TOKEN_DIR_ENV)
+    return resolve_state_path(GUARDIAN_TOKEN_STORE, base=base)
+
+
+def _load_guardian_tokens() -> dict[str, Any]:
+    p = _guardian_store_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_guardian_tokens(tokens: dict[str, Any]) -> None:
+    atomic_write_json(_guardian_store_path(), tokens)
+
+
+def issue_guardian_token(patient_id: str, issuer: str | None = None) -> dict[str, Any]:
+    """签发监护人令牌（仅 doctor_assistant）。
+
+    生成服务端随机令牌（不可由 patient_id 推导），按 patient_id 持久化到状态库。
+    家长端经安全渠道获取后，调用 verify_guardian_binding 提交以完成绑定核验。
+    重复调用将轮换（覆盖）该患儿令牌。
+    """
+    caller = issuer or get_caller()
+    if caller not in GUARDIAN_ISSUERS:
+        return _err("FORBIDDEN",
+                    f"caller={caller} 无权签发监护人令牌（仅 {sorted(GUARDIAN_ISSUERS)}）")
+    if not isinstance(patient_id, str) or not PATIENT_ID_PATTERN.match(patient_id):
+        return _err("INVALID_ARGUMENT", f"patient_id={patient_id} 格式不合法")
+    if _lookup(patient_id) is None:
+        return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
+    token = secrets.token_urlsafe(GUARDIAN_TOKEN_BYTES)
+    tokens = _load_guardian_tokens()
+    tokens[patient_id] = {
+        "token": token,
+        "issued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "issued_by": caller,
+    }
+    _save_guardian_tokens(tokens)
+    return {
+        "ok": True,
+        "data": {
+            "patient_id": patient_id,
+            "guardian_token": token,
+            "issued_at": tokens[patient_id]["issued_at"],
+            "issued_by": caller,
+            "note": "令牌须经安全渠道交付家长端，切勿写入日志或明文下发",
+        },
+    }
+
 
 MX1_NOTE = "分期以主诊医生确诊结果为准，本接口不进行 eGFR 复算（MX-1 分期互斥）"
 
@@ -101,8 +168,15 @@ def _guard_guardian(caller: str, patient_id: str, guardian_token: str | None,
 
 
 def _token_matches(patient_id: str, guardian_token: str) -> bool:
-    expected = f"guardian_{patient_id}"
-    return hmac.compare_digest(expected, guardian_token)
+    """恒定时间比对服务端持久化的随机令牌（修复 F1）。
+
+    旧实现 expected = "guardian_" + patient_id 可被任意知道 patient_id 者伪造。
+    新实现从状态库取该患儿的随机令牌做 hmac.compare_digest；患儿无令牌（或不存在）
+    时以空串参与比对，统一走恒定时间路径，避免「患儿是否存在」的枚举时序差。
+    """
+    entry = _load_guardian_tokens().get(patient_id)
+    stored = entry.get("token", "") if isinstance(entry, dict) else ""
+    return hmac.compare_digest(stored, guardian_token or "")
 
 
 def _lookup(patient_id: str) -> dict[str, Any] | None:
