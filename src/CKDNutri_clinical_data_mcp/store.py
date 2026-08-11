@@ -1,0 +1,148 @@
+"""检验数据的读取与 mock 持久层。
+
+- 只读基线：data/labs.json（由 data/generate.py 确定性生成）
+- 写库：data/labs_store.json（upsert_lab_result 追加，M1 HIS 只读主数据不受影响）
+
+数据目录解析顺序：环境变量 A207_LIS_DATA_DIR > 包内 data/ > 仓库根 data/。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from pathlib import Path
+from typing import Any
+
+from a207_policy import resolve_state_path
+
+_LOCK = threading.Lock()
+_DATASET_CACHE: dict[str, Any] | None = None
+
+try:
+    from ._labs_baseline import BASELINE as _EMBEDDED_BASELINE
+except Exception:  # pragma: no cover - 兜底，正常运行时模块必存在
+    _EMBEDDED_BASELINE = None
+
+BASE_FILENAME = "labs.json"
+STORE_FILENAME = "labs_store.json"
+
+
+def data_dir() -> Path:
+    """定位数据目录。"""
+    env = os.environ.get("A207_LIS_DATA_DIR")
+    if env:
+        return Path(env)
+    here = Path(__file__).resolve()
+    candidates = (
+        here.parent / "data",              # src/a207_lis_mcp/data
+        here.parents[2] / "data",          # 包根 data（本仓库布局）
+    )
+    for path in candidates:
+        if (path / BASE_FILENAME).exists():
+            return path
+    return candidates[-1]
+
+
+def base_path() -> Path:
+    return data_dir() / BASE_FILENAME
+
+
+def store_path() -> Path:
+    """可写写库路径（P1-3 修复：不再写安装目录）。
+
+    - 若设 A207_LIS_DATA_DIR（开发/测试态），落到该目录，与基线同处，便于联调；
+    - 否则经 a207_policy.resolve_state_path 落到 A207_DATA_DIR 或系统临时目录，
+      保证在只读安装目录/容器/云沙箱下仍可写。
+    """
+    override = os.environ.get("A207_LIS_DATA_DIR")
+    if override:
+        return Path(override) / STORE_FILENAME
+    return resolve_state_path(STORE_FILENAME)
+
+
+def load_dataset(refresh: bool = False) -> dict[str, Any]:
+    """载入只读基线数据集（进程内缓存）。
+
+    优先使用随包内联的基线模块（_labs_baseline.py），保证在任意部署环境
+    （本地 / 云沙箱 / 容器）都能自包含加载，无需外部 data/labs.json。
+    仅当内联模块缺失时，才回退到文件读取（兼容源码开发态）。
+    """
+    global _DATASET_CACHE
+    with _LOCK:
+        if _DATASET_CACHE is None or refresh:
+            if _EMBEDDED_BASELINE is not None:
+                _DATASET_CACHE = _EMBEDDED_BASELINE
+            else:
+                path = base_path()
+                if not path.exists():
+                    raise FileNotFoundError(
+                        f"检验基线数据缺失：{path}。"
+                        f"请确认 a207-lis-mcp 安装包内含内联基线数据（从当前源码重新构建发布），"
+                        f"或在运行环境设置环境变量 A207_LIS_DATA_DIR 指向含 labs.json 的目录。"
+                    )
+                _DATASET_CACHE = json.loads(path.read_text(encoding="utf-8"))
+        return _DATASET_CACHE
+
+
+def load_store() -> list[dict[str, Any]]:
+    """载入写库中追加的采样记录。"""
+    path = store_path()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    records = payload.get("records", [])
+    return records if isinstance(records, list) else []
+
+
+def append_record(record: dict[str, Any]) -> int:
+    """把一条采样追加进写库，返回写库总条数。"""
+    with _LOCK:
+        records = load_store()
+        records.append(record)
+        payload = {
+            "dataset": "a207-lis-mcp/labs_store",
+            "schema_version": "1.0.0",
+            "record_count": len(records),
+            "records": records,
+        }
+        path = store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return len(records)
+
+
+def find_patient(patient_id: str) -> dict[str, Any] | None:
+    """按 id 取患者的基线记录。"""
+    for patient in load_dataset().get("patients", []):
+        if patient.get("patient_id") == patient_id:
+            return patient
+    return None
+
+
+def merged_panels(patient_id: str) -> list[dict[str, Any]]:
+    """基线 + 写库合并，按报告日期升序；同一 sample_id 以写库为准。"""
+    patient = find_patient(patient_id)
+    panels: list[dict[str, Any]] = list(patient["panels"]) if patient else []
+    by_sample = {p["sample_id"]: dict(p) for p in panels}
+    for record in load_store():
+        if record.get("patient_id") != patient_id:
+            continue
+        by_sample[record["sample_id"]] = {
+            "sample_id": record["sample_id"],
+            "report_date": record["report_date"],
+            "specimen": record.get("specimen"),
+            "values": record["values"],
+            "source": "upsert",
+            "recorded_by": record.get("recorded_by"),
+        }
+    return sorted(by_sample.values(), key=lambda p: (p["report_date"], p["sample_id"]))
+
+
+def known_patient_ids() -> list[str]:
+    return [p["patient_id"] for p in load_dataset().get("patients", [])]
