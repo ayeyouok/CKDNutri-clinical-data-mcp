@@ -22,6 +22,13 @@ from a207_policy import (
 )
 from .errors import fail, forbidden, invalid, no_data, not_found, patient_context
 from .models import LabResultIn, PatientQuery, TrendQuery, UpsertRequest
+from .his import (
+    get_diagnosis,
+    get_nutrition_ceiling,
+    get_patient_profile,
+    list_patients,
+    verify_guardian_binding,
+)
 from .reference import ANALYTES, UNIT_ALIASES, critical_hits
 from .store import append_record, find_patient, known_patient_ids, merged_panels
 from .views import build_trend, decorate_panel, parent_view_items
