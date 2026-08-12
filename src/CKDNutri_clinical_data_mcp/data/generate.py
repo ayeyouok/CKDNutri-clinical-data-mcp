@@ -1,6 +1,6 @@
-"""a207-his-mcp 虚拟患儿数据集生成脚本。
+"""CKDNutri-clinical-data-mcp (P1 HIS) 虚拟患儿数据集生成脚本。
 
-用法：python src/a207_his_mcp/data/generate.py [输出路径]
+用法：python src/CKDNutri_clinical_data_mcp/data/generate.py [输出路径]
 
 确定性生成：固定 SEED，同一份代码任意机器跑出的 patients.json 完全一致。
 覆盖矩阵：CKD 分期 G2/G3a/G3b/G4/G5 × 透析 非透析/HD/PD × 年龄带 幼儿/学龄前/学龄/青少年。
@@ -123,8 +123,8 @@ def build_dataset() -> dict[str, Any]:
             coverage[key][p[field]] = coverage[key].get(p[field], 0) + 1
     return {
         "schema_version": "1.0.0",
-        "dataset": "a207-his-mcp mock patient master data",
-        "generated_by": "src/a207_his_mcp/data/generate.py",
+        "dataset": "CKDNutri-clinical-data-mcp (P1 HIS) mock patient master data",
+        "generated_by": "src/CKDNutri_clinical_data_mcp/data/generate.py",
         "seed": SEED,
         "as_of": BASE_DATE.isoformat(),
         "patient_count": len(patients),

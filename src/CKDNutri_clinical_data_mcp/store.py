@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from a207_policy import resolve_state_path
+from a207_policy import atomic_write_json, resolve_state_path
 
 _LOCK = threading.Lock()
 _DATASET_CACHE: dict[str, Any] | None = None
@@ -35,7 +35,7 @@ def data_dir() -> Path:
         return Path(env)
     here = Path(__file__).resolve()
     candidates = (
-        here.parent / "data",              # src/a207_lis_mcp/data
+        here.parent / "data",              # 包内 data（CKDNutri_clinical_data_mcp/data）
         here.parents[2] / "data",          # 包根 data（本仓库布局）
     )
     for path in candidates:
@@ -99,7 +99,12 @@ def load_store() -> list[dict[str, Any]]:
 
 
 def append_record(record: dict[str, Any]) -> int:
-    """把一条采样追加进写库，返回写库总条数。"""
+    """把一条采样追加进写库，返回写库总条数。
+
+    P1-5 修复（2026-08-12）：改用 a207_policy.atomic_write_json 原子写（OD-014 标准），
+    此前用 path.write_text 直接覆盖写——写一半被杀/磁盘满会留下截断文件，且
+    load_store 对损坏 JSON 静默返回 [] 后再次覆盖，会静默丢失全部检验数据。
+    """
     with _LOCK:
         records = load_store()
         records.append(record)
@@ -109,11 +114,7 @@ def append_record(record: dict[str, Any]) -> int:
             "record_count": len(records),
             "records": records,
         }
-        path = store_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        atomic_write_json(store_path(), payload)
         return len(records)
 
 

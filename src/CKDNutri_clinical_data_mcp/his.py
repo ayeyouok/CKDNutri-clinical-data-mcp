@@ -11,12 +11,11 @@
 
 from __future__ import annotations
 
-import hmac
 import json
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +30,7 @@ from a207_policy import (
     enforce_write,
     get_caller,
     resolve_state_path,
+    verify_guardian_token,
 )
 
 DEFAULT_DATA_FILE = Path(__file__).resolve().parent / "data" / "patients.json"
@@ -96,6 +96,9 @@ GUARDIAN_TOKEN_STORE = "guardian_tokens.json"
 GUARDIAN_TOKEN_BYTES = 32
 GUARDIAN_ISSUERS: frozenset[str] = frozenset({"doctor_assistant"})
 GUARDIAN_TOKEN_DIR_ENV = "A207_GUARDIAN_TOKEN_DIR"
+# 2026-08-12 修复（P2-6）：监护人令牌加有效期，过期后绑定核验失败（家长需医生重新签发）。
+# 令牌是家长端身份凭证，泄露后长期有效风险大；30 天为合理轮换周期。
+GUARDIAN_TOKEN_TTL_DAYS = 30
 
 
 def _guardian_store_path() -> Path:
@@ -134,9 +137,11 @@ def issue_guardian_token(patient_id: str, issuer: str | None = None) -> dict[str
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
     token = secrets.token_urlsafe(GUARDIAN_TOKEN_BYTES)
     tokens = _load_guardian_tokens()
+    now = datetime.now(timezone.utc)
     tokens[patient_id] = {
         "token": token,
-        "issued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "issued_at": now.isoformat(timespec="seconds"),
+        "expires_at": (now + timedelta(days=GUARDIAN_TOKEN_TTL_DAYS)).isoformat(timespec="seconds"),
         "issued_by": caller,
     }
     _save_guardian_tokens(tokens)
@@ -146,8 +151,10 @@ def issue_guardian_token(patient_id: str, issuer: str | None = None) -> dict[str
             "patient_id": patient_id,
             "guardian_token": token,
             "issued_at": tokens[patient_id]["issued_at"],
+            "expires_at": tokens[patient_id]["expires_at"],
             "issued_by": caller,
-            "note": "令牌须经安全渠道交付家长端，切勿写入日志或明文下发",
+            "note": "令牌须经安全渠道交付家长端，切勿写入日志或明文下发；"
+                    f"有效期 {GUARDIAN_TOKEN_TTL_DAYS} 天，过期需重新签发。",
         },
     }
 
@@ -204,13 +211,11 @@ def _guard_guardian(caller: str, patient_id: str, guardian_token: str | None,
 def _token_matches(patient_id: str, guardian_token: str) -> bool:
     """恒定时间比对服务端持久化的随机令牌（修复 F1）。
 
-    旧实现 expected = "guardian_" + patient_id 可被任意知道 patient_id 者伪造。
-    新实现从状态库取该患儿的随机令牌做 hmac.compare_digest；患儿无令牌（或不存在）
-    时以空串参与比对，统一走恒定时间路径，避免「患儿是否存在」的枚举时序差。
+    BUG-36（2026-08-12）：校验逻辑统一收敛到 a207_policy.verify_guardian_token
+    （含 expires_at 过期校验 + 恒定时间比对 + 旧令牌兼容），消除与 P2 nutrition 的
+    副本漂移——此前 P2 各维护一份副本且缺过期校验，令牌轮换后旧令牌在 P2 仍有效。
     """
-    entry = _load_guardian_tokens().get(patient_id)
-    stored = entry.get("token", "") if isinstance(entry, dict) else ""
-    return hmac.compare_digest(stored, guardian_token or "")
+    return verify_guardian_token(patient_id, guardian_token)
 
 
 def _lookup(patient_id: str) -> dict[str, Any] | None:
@@ -220,10 +225,10 @@ def _lookup(patient_id: str) -> dict[str, Any] | None:
 
 
 def _scope_of(caller: str) -> str:
+    # BUG-31（2026-08-12）：删除退役角色 nutritionist 分支（v2.3 阶段 0 已退役，
+    # CALLERS 仅剩 3 个身份）；家长受限视图、其余（doctor/risk）全量。
     if caller == "parent_assistant":
         return "limited_parent"
-    if caller == "nutritionist":
-        return "limited_nutritionist"
     return "full"
 
 
@@ -289,14 +294,9 @@ def get_patient_profile(patient_id: str,
         data["dialysis_detail"] = p["dialysis_detail"]
         data["food_diary_5d"] = p["food_diary_5d"]
         data["biochemistry"] = p["biochemistry"]
-    elif scope == "limited_nutritionist":
-        # 退役角色分支（营养评估已并入 P2）：保留逻辑，脱敏基准同家长视图引用中央集合
-        data["dialysis_detail"] = p["dialysis_detail"]
-        data["food_diary_5d"] = p["food_diary_5d"]
-        data["withheld"] = sorted(P1_PARENT_HIDDEN_FIELDS & {"biochemistry", "medical_record_no"})
-        data["withheld_reason"] = "营养师无 M2 LIS 读权，生化数据不经 M1 旁路下发"
     else:
         # 家长受限视图（F3）：以 a207_policy 单一事实源递归剥敏感键，withheld 声明引用中央集合
+        # BUG-31：删除退役角色 limited_nutritionist 分支（nutritionist 已退役）
         removed: set[str] = set()
         data = _strip_parent_sensitive(data, removed)
         data["withheld"] = sorted(_PARENT_WITHHELD_DOC)

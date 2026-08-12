@@ -7,20 +7,10 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PATIENT_ID_RE = re.compile(r"^P[0-9]{4,}$")
-
-Caller = Literal[
-    "orchestrator",
-    "doctor_assistant",
-    "nutritionist",
-    "parent_assistant",
-    "child_companion",
-    "risk_warning",
-]
 
 
 class _Strict(BaseModel):
@@ -28,10 +18,14 @@ class _Strict(BaseModel):
 
 
 class PatientQuery(_Strict):
-    """只读工具的通用入参。"""
+    """只读工具的通用入参。
+
+    BUG-38（2026-08-12）：移除遗留的 caller 字段——身份由部署注入的 A207_CALLER 读取
+    （get_caller），权限校验由 _guard_access/enforce_* 完成，模型里传 caller 是 P0-1
+    修复前的死字段（传了不用，还占 extra="forbid" 白名单位）。
+    """
 
     patient_id: str
-    caller: str = "doctor_assistant"
 
     @field_validator("patient_id")
     @classmethod
@@ -88,7 +82,6 @@ class LabResultIn(_Strict):
 
 class UpsertRequest(_Strict):
     patient_id: str
-    caller: str
     lab: LabResultIn
     write_mode: bool = True
 

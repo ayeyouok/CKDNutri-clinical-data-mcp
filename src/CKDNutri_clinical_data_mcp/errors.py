@@ -37,11 +37,15 @@ def invalid(exc: ValidationError | ValueError) -> dict[str, Any]:
 
 
 def patient_context(patient: dict[str, Any]) -> dict[str, Any]:
-    """检验解读所需的最小临床上下文（年龄别参考区间与分期相关判读用）。"""
+    """检验解读所需的最小临床上下文（年龄别参考区间与分期相关判读用）。
+
+    BUG-13 修复：HIS 数据集用 primary_disease、LIS 数据集用 primary_dx——
+    两套数据源对同一概念字段名不一致，此处兼容读取，避免按错误数据源调用时 KeyError。
+    """
     return {
         "age_years": patient["age_years"],
         "sex": patient["sex"],
         "ckd_stage": patient["ckd_stage"],
         "dialysis": patient["dialysis"],
-        "primary_dx": patient["primary_dx"],
+        "primary_dx": patient.get("primary_dx") or patient.get("primary_disease"),
     }

@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from fastmcp import FastMCP
 
@@ -68,7 +68,12 @@ def verify_guardian_binding_tool(patient_id: str, guardian_token: str) -> dict[s
 
 @mcp.tool
 def issue_guardian_token_tool(patient_id: str) -> dict[str, Any]:
-    """签发监护人令牌（仅 CKD 临床助手）。生成随机令牌供家长端绑定核验，返回一次性令牌。"""
+    """签发监护人令牌（仅 CKD 临床助手）。生成随机令牌供家长端绑定核验，返回一次性令牌。
+
+    BUG-17 说明（2026-08-12）：本工具不在需求 P1 工具表 10 项内，但为家长受限视图
+    绑定核验（F1/F4）所必需——家长访问 HIS/M2 数据均须凭此令牌。token 有效期 30 天，
+    过期由医生重新签发。
+    """
     try:
         return issue_guardian_token(patient_id)
     except Exception as exc:
@@ -105,19 +110,20 @@ def get_labs_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
 
 
 @mcp.tool
-def get_critical_values_tool(patient_id: str) -> dict[str, Any]:
-    """查是否有当前危急值。"""
+def get_critical_values_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
+    """查是否有当前危急值。临床/风险=全量明细；家庭助手=有/无受限视图（需 guardian_token）。"""
     try:
-        return get_critical_values(patient_id)
+        return get_critical_values(patient_id, guardian_token)
     except Exception as exc:
         return _invalid(exc)
 
 
 @mcp.tool
-def get_lab_trend_tool(patient_id: str, analyte: str, window_days: int = None) -> dict[str, Any]:
-    """查指定指标最近 N 次趋势（可选 window_days 限制时间窗口）。"""
+def get_lab_trend_tool(patient_id: str, analyte: str, window_days: int = None,
+                       guardian_token: str = "") -> dict[str, Any]:
+    """查指定指标最近 N 次趋势。临床/风险=全量；家庭助手=仅方向受限视图（需 guardian_token）。"""
     try:
-        return get_lab_trend(patient_id, analyte, window_days)
+        return get_lab_trend(patient_id, analyte, window_days, guardian_token)
     except Exception as exc:
         return _invalid(exc)
 

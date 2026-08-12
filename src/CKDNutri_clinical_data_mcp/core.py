@@ -23,6 +23,7 @@ from a207_policy import (
 from .errors import fail, forbidden, invalid, no_data, not_found, patient_context
 from .models import LabResultIn, PatientQuery, TrendQuery, UpsertRequest
 from .his import (
+    COHORT_CALLERS,
     _guard_access,
     _guard_guardian,
     get_diagnosis,
@@ -33,7 +34,7 @@ from .his import (
 )
 from .reference import ANALYTES, UNIT_ALIASES, critical_hits
 from .store import append_record, find_patient, known_patient_ids, merged_panels
-from .views import build_trend, decorate_panel, parent_view_items
+from .views import build_trend, decorate_panel, parent_trend_direction, parent_view_items
 
 # 权限数据来自 a207_policy（Plan A 单一事实源）；本包不再维护第二份。
 READ_FULL = LIS_READ_FULL
@@ -56,7 +57,7 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
     """
     caller = get_caller()
     try:
-        query = PatientQuery(patient_id=patient_id, caller=caller)
+        query = PatientQuery(patient_id=patient_id)
     except ValidationError as exc:
         return invalid(exc)
 
@@ -109,12 +110,18 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
 # --- 工具 2：get_critical_values --------------------------------------------
 
 def get_critical_values(
-    patient_id: str
+    patient_id: str,
+    guardian_token: str | None = None,
 ) -> dict[str, Any]:
-    """危急值独立通道：扫描最近一次采样，命中项直连通知链路。"""
+    """危急值独立通道：扫描最近一次采样，命中项直连通知链路。
+
+    BUG-05 修复（2026-08-12 需求对齐）：需求 P1 工具表 get_critical_values 家庭=✔（有/无）。
+    家长助手可查"是否存在危急值"（受限视图，不含任何数值/明细），但必须携带
+    guardian_token 完成患儿绑定核验；临床/风险角色返回全量命中明细。
+    """
     caller = get_caller()
     try:
-        query = PatientQuery(patient_id=patient_id, caller=caller)
+        query = PatientQuery(patient_id=patient_id)
     except ValidationError as exc:
         return invalid(exc)
 
@@ -122,8 +129,10 @@ def get_critical_values(
     denied = _guard_access("get_critical_values")
     if denied:
         return denied
-    if caller not in CRITICAL_CHANNEL:
-        return forbidden(caller, "get_critical_values")
+    # 家长受限视图必须经监护人令牌绑定核验（F4，同 get_labs）
+    denied = _guard_guardian(caller, query.patient_id, guardian_token, "get_critical_values")
+    if denied:
+        return denied
 
     patient = find_patient(query.patient_id)
     if patient is None:
@@ -135,6 +144,20 @@ def get_critical_values(
 
     latest = panels[-1]
     hits = critical_hits(latest["values"])
+    # BUG-05：家长仅可见"有/无"受限视图（需求 P1 家庭=✔ 有/无），不落 CRITICAL_CHANNEL
+    if caller not in CRITICAL_CHANNEL:
+        if caller != "parent_assistant":
+            return forbidden(caller, "get_critical_values")
+        return {
+            "ok": True,
+            "data": {
+                "patient_id": query.patient_id,
+                "data_scope": "limited_parent",
+                "report_date": latest["report_date"],
+                "has_critical": bool(hits),
+                "note": "受限视图仅提示是否存在危急值（有/无），具体项目请咨询主管医生。",
+            },
+        }
     history = [
         {"report_date": p["report_date"], "hit_count": len(critical_hits(p["values"]))}
         for p in panels[:-1]
@@ -172,13 +195,18 @@ def get_lab_trend(
     patient_id: str,
     analyte: str,
     window_days: int | None = None,
+    guardian_token: str | None = None,
 ) -> dict[str, Any]:
-    """单指标时间序列 + 环比变化率 + 每 30 天斜率。家长助手无全量趋势权限。"""
+    """单指标时间序列 + 环比变化率 + 每 30 天斜率。
+
+    BUG-06 修复（2026-08-12 需求对齐）：需求 P1 工具表 get_lab_trend 家庭=✔（仅方向）。
+    家长助手可查指定指标的**趋势方向**（受限视图，不含任何数值），但必须携带
+    guardian_token 完成患儿绑定核验；临床/风险角色返回全量趋势。
+    """
     caller = get_caller()
     try:
         query = TrendQuery(
             patient_id=patient_id,
-            caller=caller,
             analyte=analyte,
             window_days=window_days,
         )
@@ -189,8 +217,10 @@ def get_lab_trend(
     denied = _guard_access("get_lab_trend")
     if denied:
         return denied
-    if caller not in READ_FULL:
-        return forbidden(caller, "get_lab_trend")
+    # 家长受限视图必须经监护人令牌绑定核验（F4）
+    denied = _guard_guardian(caller, query.patient_id, guardian_token, "get_lab_trend")
+    if denied:
+        return denied
     if query.analyte not in ANALYTES:
         return fail(
             "INVALID_ARGUMENT",
@@ -204,6 +234,23 @@ def get_lab_trend(
     panels = merged_panels(query.patient_id)
     if query.window_days is not None:
         panels = _within_window(panels, query.window_days)
+
+    # BUG-06：家长仅可见趋势方向受限视图（需求 P1 家庭=✔ 仅方向），不落 READ_FULL
+    if caller not in READ_FULL:
+        if caller != "parent_assistant":
+            return forbidden(caller, "get_lab_trend")
+        return {
+            "ok": True,
+            "data": {
+                "patient_id": query.patient_id,
+                "data_scope": "limited_parent",
+                "analyte": query.analyte,
+                "label": ANALYTES[query.analyte]["label"],
+                "unit": ANALYTES[query.analyte]["unit"],
+                "direction": parent_trend_direction(query.analyte, panels),
+                "note": "受限视图仅提示趋势方向（↑/↓/→），不含具体数值，详情请咨询主管医生。",
+            },
+        }
 
     trend = build_trend(
         panels, query.analyte, float(patient["age_years"]), patient["sex"]
@@ -250,7 +297,7 @@ def upsert_lab_result(
 
     try:
         request = UpsertRequest(
-            patient_id=patient_id, caller=caller, lab=lab, write_mode=write_mode
+            patient_id=patient_id, lab=lab, write_mode=write_mode
         )
     except ValidationError as exc:
         return invalid(exc)
@@ -300,12 +347,16 @@ def upsert_lab_result(
 def list_known_patients() -> dict[str, Any]:
     """列出本 LIS 数据集覆盖的 patient_id（供跨包联调核对）。
 
-    OD-012：受 M2 读权限矩阵约束（doctor/risk_warning 全量、parent 受限视图，其余角色禁止）；
-    此前该 core 函数既无 caller 也无闸门，直接调用可绕过 server 层 gate。
+    OD-012 + 2026-08-12 修复（P1-1）：受 M2 读权限矩阵约束（doctor/risk_warning 全量、
+    parent 受限视图，其余角色禁止）；**跨患者队列枚举仅限临床/风险身份**（与 list_patients
+    的 COHORT_CALLERS 一致）——此前仅做读权检查，家长（RL）可枚举全部 patient_id（PII）。
     """
     caller = get_caller()
     denied = _guard_access("list_known_patients")
     if denied:
         return denied
+    # P1-1 修复：家长仅能访问被绑定单个患儿，不得枚举全量患者花名册
+    if caller not in COHORT_CALLERS:
+        return forbidden(caller, "list_known_patients")
     ids = known_patient_ids()
     return {"ok": True, "data": {"count": len(ids), "patient_ids": ids}}

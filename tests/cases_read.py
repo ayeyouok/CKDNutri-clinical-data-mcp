@@ -176,11 +176,33 @@ def _crit_none():
     assert res["data"]["next_action"] is None
 
 
-@check("get_critical_values 家长助手无危急值通道权限")
-def _crit_denied():
+@check("get_critical_values 家长助手可见有/无受限视图（需求 P1 家庭=✔，BUG-05 修复）")
+def _crit_parent():
+    tok = _parent_token("P0028")
+    with as_caller("parent_assistant"):
+        res = core.get_critical_values("P0028", guardian_token=tok)
+    assert res["ok"] is True, res
+    data = res["data"]
+    assert data["data_scope"] == "limited_parent"
+    assert data["has_critical"] is True
+    assert "items" not in data, "受限视图不应含危急明细"
+    assert not numeric_leak(data), "危急场景受限视图泄露了数值"
+
+
+@check("get_critical_values 家长助手缺 guardian_token 拒绝")
+def _crit_parent_no_token():
     with as_caller("parent_assistant"):
         res = core.get_critical_values("P0028")
-    assert res["ok"] is False and res["error"] == "FORBIDDEN", res
+    assert res["ok"] is False and res["error"] == "GUARDIAN_UNVERIFIED", res
+
+
+@check("get_critical_values 家长助手对平稳患者返回 has_critical=False")
+def _crit_parent_none():
+    tok = _parent_token("P0001")
+    with as_caller("parent_assistant"):
+        res = core.get_critical_values("P0001", guardian_token=tok)
+    assert res["ok"] is True
+    assert res["data"]["has_critical"] is False
 
 
 @check("get_lab_trend 返回时序、环比与斜率")
@@ -211,11 +233,23 @@ def _trend_window():
     assert 1 <= narrow <= full, (full, narrow)
 
 
-@check("get_lab_trend 家长助手无全量趋势权限")
+@check("get_lab_trend 家长助手可见方向受限视图（需求 P1 家庭=✔ 仅方向，BUG-06 修复）")
 def _trend_parent():
+    tok = _parent_token("P0013")
+    with as_caller("parent_assistant"):
+        res = core.get_lab_trend("P0013", "k_mmol_L", guardian_token=tok)
+    assert res["ok"] is True, res
+    data = res["data"]
+    assert data["data_scope"] == "limited_parent"
+    assert data["direction"] in ("up", "down", "flat"), data
+    assert not numeric_leak(data), "家长趋势视图泄露了数值"
+
+
+@check("get_lab_trend 家长助手缺 guardian_token 拒绝")
+def _trend_parent_no_token():
     with as_caller("parent_assistant"):
         res = core.get_lab_trend("P0013", "k_mmol_L")
-    assert res["ok"] is False and res["error"] == "FORBIDDEN", res
+    assert res["ok"] is False and res["error"] == "GUARDIAN_UNVERIFIED", res
 
 
 @check("get_lab_trend 未知指标被拒")

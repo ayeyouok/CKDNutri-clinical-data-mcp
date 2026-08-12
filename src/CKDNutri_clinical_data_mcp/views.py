@@ -96,6 +96,19 @@ def parent_view_items(
     return items
 
 
+def parent_trend_direction(analyte: str, panels: list[dict[str, Any]]) -> str:
+    """家长受限趋势视图：仅返回最近两次采样的方向码（up/down/flat），不含任何数值。
+
+    BUG-06 修复配套（需求 P1：get_lab_trend 家庭=✔ 仅方向）。
+    """
+    points = [p for p in panels if p.get("values", {}).get(analyte) is not None]
+    if not points:
+        return "flat"
+    latest = float(points[-1]["values"][analyte])
+    previous = float(points[-2]["values"][analyte]) if len(points) >= 2 else None
+    return trend_code(latest, previous, analyte)
+
+
 def _days_between(start: str, end: str) -> int:
     return (date.fromisoformat(end) - date.fromisoformat(start)).days
 

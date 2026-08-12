@@ -1,4 +1,4 @@
-"""a207-his-mcp 数据构造器。
+"""CKDNutri-clinical-data-mcp (P1 HIS) 数据构造器。
 
 把单例患儿的各个子结构（人体测量、营养上限、透析方案、饮食日记、生化序列）
 拆成独立函数，供 generate.py 组装。全部依赖传入的 random.Random 实例，
