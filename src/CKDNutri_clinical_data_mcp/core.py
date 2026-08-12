@@ -27,8 +27,13 @@ from .his import (
     _guard_guardian,
 )
 from .reference import ANALYTES, UNIT_ALIASES, critical_hits
-from .store import append_record, find_patient, known_patient_ids, merged_panels
 from .views import build_trend, decorate_panel, parent_trend_direction, parent_view_items
+
+# v2.4：业务层数据访问统一走 repository（双后端），不再直连 store 文件层。
+def _repo():
+    from .repository import get_repository
+
+    return get_repository()
 
 # 权限数据来自 a207_policy（Plan A 单一事实源）；本包不再维护第二份。
 READ_FULL = LIS_READ_FULL
@@ -63,11 +68,11 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
     if denied:
         return denied
 
-    patient = find_patient(query.patient_id)
+    patient = _repo().get_patient(query.patient_id)
     if patient is None:
         return not_found(query.patient_id)
 
-    panels = merged_panels(query.patient_id)
+    panels = _repo().get_panels(query.patient_id)
     age, sex = float(patient["age_years"]), patient["sex"]
 
     # 空数据统一 NO_DATA（2026-08-12）：此前仅 READ_LIMITED 家长分支返回 no_data、
@@ -131,11 +136,11 @@ def get_critical_values(
     if denied:
         return denied
 
-    patient = find_patient(query.patient_id)
+    patient = _repo().get_patient(query.patient_id)
     if patient is None:
         return not_found(query.patient_id)
 
-    panels = merged_panels(query.patient_id)
+    panels = _repo().get_panels(query.patient_id)
     if not panels:
         return no_data(query.patient_id)
 
@@ -233,11 +238,11 @@ def get_lab_trend(
             f"analyte={query.analyte} 未知，可选：{', '.join(sorted(ANALYTES))}",
         )
 
-    patient = find_patient(query.patient_id)
+    patient = _repo().get_patient(query.patient_id)
     if patient is None:
         return not_found(query.patient_id)
 
-    panels = merged_panels(query.patient_id)
+    panels = _repo().get_panels(query.patient_id)
     if query.window_days is not None:
         panels = _within_window(panels, query.window_days)
     # 空数据统一 NO_DATA（对齐 get_critical_values L136 / get_labs）：角色分支之前、
@@ -340,7 +345,7 @@ def upsert_lab_result(
     except ValidationError as exc:
         return invalid(exc)
 
-    patient = find_patient(request.patient_id)
+    patient = _repo().get_patient(request.patient_id)
     if patient is None:
         return not_found(request.patient_id)
 
@@ -353,7 +358,7 @@ def upsert_lab_result(
     if not values:
         return fail("INVALID_ARGUMENT", "lab 中未提供任何可识别的检验指标")
 
-    existing = len(merged_panels(request.patient_id))
+    existing = len(_repo().get_panels(request.patient_id))
     sample_id = request.lab.sample_id or f"{request.patient_id}-U{existing + 1:02d}"
     record = {
         "patient_id": request.patient_id,
@@ -365,7 +370,7 @@ def upsert_lab_result(
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
-    store_size = append_record(record) if request.write_mode else None
+    store_size = _repo().append_lab_record(record) if request.write_mode else None
     hits = critical_hits(values)
     return {
         "ok": True,
@@ -401,5 +406,5 @@ def list_known_patients() -> dict[str, Any]:
     # P1-1 修复：家长仅能访问被绑定单个患儿，不得枚举全量患者花名册
     if caller not in COHORT_CALLERS:
         return forbidden(caller, "list_known_patients")
-    ids = known_patient_ids()
+    ids = _repo().known_lis_patient_ids()
     return {"ok": True, "data": {"count": len(ids), "patient_ids": ids}}

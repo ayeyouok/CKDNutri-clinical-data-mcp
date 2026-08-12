@@ -53,6 +53,11 @@ _PAT_NESTED_COLS = ("biochemistry", "food_diary_5d", "nutrition_ceiling",
 class ClinicalDataRepository(Protocol):
     """P1 数据访问契约（HIS 患者主数据 + LIS 化验 + 监护人令牌库）。"""
 
+    # ---- 数据集元数据 ----
+    def get_dataset_meta(self) -> dict[str, Any]:
+        """返回数据集级元数据（as_of / units / schema_version / patient_count）。"""
+        ...
+
     # ---- HIS 患者主数据 ----
     def get_patient(self, patient_id: str) -> dict[str, Any] | None:
         """按主索引取患者完整档案（含 nutrition_ceiling 等嵌套结构）。"""
@@ -95,6 +100,15 @@ class LocalJsonRepository:
     复用 store.py / his.py 的既有读取与原子写逻辑，避免双份实现漂移。
     """
 
+    def get_dataset_meta(self) -> dict[str, Any]:
+        ds = _his.load_dataset()
+        return {
+            "as_of": ds.get("as_of"),
+            "units": ds.get("units"),
+            "schema_version": ds.get("schema_version"),
+            "patient_count": len(ds.get("patients", [])),
+        }
+
     def get_patient(self, patient_id: str) -> dict[str, Any] | None:
         # 用公共 load_dataset 自行查找，不依赖 his 私有 _lookup 缓存
         for p in _his.load_dataset().get("patients", []):
@@ -103,13 +117,25 @@ class LocalJsonRepository:
         return None
 
     def list_patients(self, criteria: dict[str, Any]) -> list[dict[str, Any]]:
-        # 复用 his.list_patients 的筛选逻辑（返回信封），此处取 data.patients
-        from .his import list_patients as _list_patients
+        # 直读数据集自行筛选（不复用 his.list_patients——业务层改走本接口后
+        # 会递归；筛选谓词复用 his._match 单一事实源，与业务层行为一致）。
+        from .his import _match
 
-        result = _list_patients(criteria)
-        if not result.get("ok"):
-            return []
-        return (result["data"] or {}).get("patients", [])
+        criteria = criteria or {}
+        matched = []
+        for p in _his.load_dataset().get("patients", []):
+            if all(_match(p, k, v) for k, v in criteria.items()):
+                matched.append({
+                    "patient_id": p["patient_id"],
+                    "age_years": p["age_years"],
+                    "age_band": p["age_band"],
+                    "sex": p["sex"],
+                    "ckd_stage": p["ckd_stage"],
+                    "dialysis": p["dialysis"],
+                    "primary_disease": p["primary_disease"],
+                    "has_allergies": bool(p.get("allergies")),
+                })
+        return matched
 
     def all_patient_ids(self) -> list[str]:
         return [p["patient_id"] for p in _his.load_dataset().get("patients", [])]
@@ -159,10 +185,16 @@ class TablestoreRepository:
             raise RuntimeError(
                 f"Tablestore 后端缺少连接参数：{', '.join(missing)}。"
                 f"请设置 A207_STORAGE_BACKEND=tablestore 时一并注入 A207_OTS_* 环境变量。")
-        import tablestore  # 延迟导入：JSON 后端无需依赖 SDK
+        self._client = None  # 惰性建连（_get_client() 首次调用时）
 
-        self._client = tablestore.OTSClient(
-            self.endpoint, self.ak_id, self.ak_secret, self.instance)
+    def _get_client(self):
+        """惰性建连（单例）：业务层每请求调用 get_repository()，避免重复握手。"""
+        if self._client is None:
+            import tablestore  # 延迟导入：JSON 后端无需依赖 SDK
+
+            self._client = tablestore.OTSClient(
+                self.endpoint, self.ak_id, self.ak_secret, self.instance)
+        return self._client
 
     # ---- 基础读写 ----
 
@@ -176,7 +208,7 @@ class TablestoreRepository:
 
     def _get_row(self, table: str, pk: list[tuple[str, str]]) -> dict[str, Any] | None:
         try:
-            _, row, _ = self._client.get_row(table, pk)
+            _, row, _ = self._get_client().get_row(table, pk)
         except Exception:
             return None
         if row is None:
@@ -192,7 +224,7 @@ class TablestoreRepository:
         # SDK 不支持 None 属性值：过滤掉（缺列等价于 JSON 里缺键，读取侧容错）
         clean = {k: v for k, v in attrs.items() if v is not None}
         row = Row(pk, list(clean.items()))
-        self._client.put_row(table, row, condition)
+        self._get_client().put_row(table, row, condition)
 
     def _range_all(self, table: str) -> list[dict[str, Any]]:
         """全表 GetRange（主键升序）。返回 [{primary_key_dict, attrs_dict}]。"""
@@ -205,7 +237,7 @@ class TablestoreRepository:
         rows: list[dict[str, Any]] = []
         next_start = start
         while next_start is not None:
-            consumed, next_start, row_list, _ = self._client.get_range(
+            consumed, next_start, row_list, _ = self._get_client().get_range(
                 table, "FORWARD", next_start, end, limit=200)
             for row in row_list:  # 6.4.8 返回 Row 对象（.primary_key/.attribute_columns）
                 pk_dict = {}
@@ -215,6 +247,27 @@ class TablestoreRepository:
                 attrs_dict = {name: value for name, value, _ in row.attribute_columns}
                 rows.append({"pk": pk_dict, "attrs": attrs_dict})
         return rows
+
+    # ---- 数据集元数据 ----
+
+    def get_dataset_meta(self) -> dict[str, Any]:
+        """数据集级元数据（as_of/units/schema_version）。
+
+        units 是静态 schema 配置（单位表）、as_of 是基线快照日期——属于「配置」
+        而非「运行时数据」，与存储后端解耦：Tablestore 端同样从随包发布的
+        patients.json 读取（若文件缺失则返回空 units + as_of=None）。
+        """
+        try:
+            ds = _his.load_dataset()
+        except FileNotFoundError:
+            return {"as_of": None, "units": {}, "schema_version": None,
+                    "patient_count": len(self.all_patient_ids())}
+        return {
+            "as_of": ds.get("as_of"),
+            "units": ds.get("units"),
+            "schema_version": ds.get("schema_version"),
+            "patient_count": len(self.all_patient_ids()),
+        }
 
     # ---- HIS 患者主数据 ----
 
@@ -370,7 +423,7 @@ class TablestoreRepository:
         # 全量覆盖语义（与 JSON 原子写一致）：先清空再批量写
         for item in self._range_all(TABLE_GUARDIAN_TOKENS):
             row = Row([("patient_id", item["pk"]["patient_id"])])
-            self._client.delete_row(
+            self._get_client().delete_row(
                 TABLE_GUARDIAN_TOKENS, row,
                 Condition(RowExistenceExpectation.IGNORE))
         for patient_id, payload in tokens.items():

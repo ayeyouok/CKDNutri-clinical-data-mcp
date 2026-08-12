@@ -35,6 +35,13 @@ from a207_policy import (
     verify_guardian_token,
 )
 
+# v2.4：业务层数据访问统一走 repository（双后端），不再直连 JSON 文件。
+# 延迟导入避免循环引用（repository 内部 import 本模块的筛选谓词）。
+def _repo():
+    from .repository import get_repository
+
+    return get_repository()
+
 DEFAULT_DATA_FILE = Path(__file__).resolve().parent / "data" / "patients.json"
 DATA_FILE_ENV = "A207_HIS_DATA_FILE"
 PATIENT_ID_PATTERN = re.compile(r"^P[0-9]{4,}$")
@@ -163,11 +170,12 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
                     f"caller={caller} 无权签发监护人令牌（仅 {sorted(GUARDIAN_ISSUERS)}）")
     if not isinstance(patient_id, str) or not PATIENT_ID_PATTERN.match(patient_id):
         return _err("INVALID_ARGUMENT", f"patient_id={patient_id} 格式不合法")
-    if _lookup(patient_id) is None:
+    if _repo().get_patient(patient_id) is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
     token = secrets.token_urlsafe(GUARDIAN_TOKEN_BYTES)
     with _TOKEN_LOCK:  # BUG（2026-08-12）：RMW 持锁防并发签发 Lost Update
-        tokens = _load_guardian_tokens()
+        repo = _repo()
+        tokens = repo.load_guardian_tokens()
         now = datetime.now(timezone.utc)
         tokens[patient_id] = {
             "token": token,
@@ -175,7 +183,7 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
             "expires_at": (now + timedelta(days=GUARDIAN_TOKEN_TTL_DAYS)).isoformat(timespec="seconds"),
             "issued_by": caller,
         }
-        _save_guardian_tokens(tokens)
+        repo.save_guardian_tokens(tokens)
     return {
         "ok": True,
         "data": {
@@ -310,19 +318,20 @@ def get_patient_profile(patient_id: str,
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_patient_profile")
     if denied:
         return denied
-    p = _lookup(patient_id)
+    p = _repo().get_patient(patient_id)
     if p is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
 
     scope = _scope_of(caller)
+    meta = _repo().get_dataset_meta()
     data: dict[str, Any] = {
         "patient_id": p["patient_id"],
         "data_scope": scope,
-        "as_of": load_dataset()["as_of"],
+        "as_of": meta["as_of"],
         # units 为基础名元数据（数据 schema 展示用，键如 "scr"/"potassium"，与 values
         # 的契约键 "scr_umol_L"/"k_mmol_L" 不同空间）；单位解析唯一事实源 =
         # reference.ANALYTES（契约键 → label/unit），勿按 values 键在 units 中查找。
-        "units": load_dataset()["units"],
+        "units": meta["units"],
         "demographics": _demographics_block(p, scope),
         "diagnosis": _diagnosis_block(p),
         "allergies": list(p["allergies"]),
@@ -356,7 +365,7 @@ def get_diagnosis(patient_id: str,
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_diagnosis")
     if denied:
         return denied
-    p = _lookup(patient_id)
+    p = _repo().get_patient(patient_id)
     if p is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
     payload: dict[str, Any] = {
@@ -391,7 +400,7 @@ def verify_guardian_binding(patient_id: str, guardian_token: str) -> dict[str, A
         return denied
     if not isinstance(guardian_token, str) or not guardian_token:
         return _err("INVALID_ARGUMENT", "guardian_token 不能为空")
-    p = _lookup(patient_id)
+    p = _repo().get_patient(patient_id)
     bound = p is not None and _token_matches(patient_id, guardian_token)
     return {
         "ok": True,
@@ -478,24 +487,15 @@ def list_patients(filter: dict[str, Any] | None = None) -> dict[str, Any]:
     if err:
         return _err("INVALID_FILTER", err)
 
-    rows = []
-    for p in load_dataset()["patients"]:
-        if all(_match(p, k, v) for k, v in criteria.items()):
-            rows.append({
-                "patient_id": p["patient_id"],
-                "age_years": p["age_years"],
-                "age_band": p["age_band"],
-                "sex": p["sex"],
-                "ckd_stage": p["ckd_stage"],
-                "dialysis": p["dialysis"],
-                "primary_disease": p["primary_disease"],
-                "has_allergies": bool(p["allergies"]),
-            })
+    # v2.4：数据读取走 repository（双后端），筛选谓词在 repo 内部复用本模块 _match
+    repo = _repo()
+    rows = repo.list_patients(criteria)
+    meta = repo.get_dataset_meta()
     return {
         "ok": True,
         "data": {
             "count": len(rows),
-            "total_in_dataset": len(load_dataset()["patients"]),
+            "total_in_dataset": meta["patient_count"],
             "applied_filter": dict(criteria),
             "patient_ids": [r["patient_id"] for r in rows],
             "patients": rows,
@@ -513,7 +513,7 @@ def get_nutrition_ceiling(patient_id: str,
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_nutrition_ceiling")
     if denied:
         return denied
-    p = _lookup(patient_id)
+    p = _repo().get_patient(patient_id)
     if p is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
     return {
