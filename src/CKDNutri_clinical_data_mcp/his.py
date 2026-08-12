@@ -180,7 +180,7 @@ def load_dataset(force_reload: bool = False) -> dict[str, Any]:
     if force_reload or _CACHE.get("path") != key:
         if not path.exists():
             raise FileNotFoundError(
-                f"患者数据集不存在：{path}；先运行 src/a207_his_mcp/data/generate.py 生成")
+                f"患者数据集不存在：{path}；先运行 src/CKDNutri_clinical_data_mcp/data/generate.py 生成")
         raw = json.loads(path.read_text(encoding="utf-8"))
         index = {p["patient_id"]: p for p in raw["patients"]}
         if len(index) != len(raw["patients"]):
@@ -204,7 +204,9 @@ def _guard_guardian(caller: str, patient_id: str, guardian_token: str | None,
         return _err("GUARDIAN_UNVERIFIED",
                     f"caller=parent_assistant 调用 {tool} 必须携带 guardian_token")
     if not _token_matches(patient_id, guardian_token):
-        return _err("FORBIDDEN", f"guardian_token 与 patient_id={patient_id} 不匹配")
+        # BUG-43（2026-08-12）：与 P2 错误消息统一——令牌过期（30 天 TTL）是常见拒绝原因，
+        # 仅提示"不匹配"会让家长误以为输错 token，而不是过期需重新签发。
+        return _err("FORBIDDEN", f"guardian_token 与 patient_id={patient_id} 不匹配或已过期")
     return None
 
 

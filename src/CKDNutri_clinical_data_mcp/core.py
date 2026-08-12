@@ -17,7 +17,6 @@ from a207_policy import (
     LIS_CRITICAL_CHANNEL,
     LIS_READ_FULL,
     LIS_READ_LIMITED,
-    LIS_WRITE_ALLOWED,
     get_caller,
 )
 from .errors import fail, forbidden, invalid, no_data, not_found, patient_context
@@ -26,11 +25,6 @@ from .his import (
     COHORT_CALLERS,
     _guard_access,
     _guard_guardian,
-    get_diagnosis,
-    get_nutrition_ceiling,
-    get_patient_profile,
-    list_patients,
-    verify_guardian_binding,
 )
 from .reference import ANALYTES, UNIT_ALIASES, critical_hits
 from .store import append_record, find_patient, known_patient_ids, merged_panels
@@ -40,7 +34,6 @@ from .views import build_trend, decorate_panel, parent_trend_direction, parent_v
 READ_FULL = LIS_READ_FULL
 READ_LIMITED = LIS_READ_LIMITED
 CRITICAL_CHANNEL = LIS_CRITICAL_CHANNEL
-WRITE_ALLOWED = LIS_WRITE_ALLOWED
 
 REEVALUATE_HINT = "a207-risk-rules-mcp.evaluate_risk_rules"
 NOTIFY_HINT = "a207-notify-mcp.notify_critical_value"

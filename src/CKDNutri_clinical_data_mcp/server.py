@@ -10,26 +10,37 @@ from fastmcp import FastMCP
 
 from a207_policy import CallerError
 
+# BUG-55（2026-08-12）：函数拆分到 his.py 后，server 导入未同步——get_diagnosis /
+# get_patient_profile / get_nutrition_ceiling / list_patients / verify_guardian_binding
+# 实际定义在 .his，此前全从 .core 导入导致 server 整体 ImportError、P1 MCP 无法启动。
+# 按真实模块归属拆分导入。
 from .core import (
     get_critical_values,
-    get_diagnosis,
     get_labs,
     get_lab_trend,
+    list_known_patients,
+    upsert_lab_result,
+)
+from .his import (
+    get_diagnosis,
     get_nutrition_ceiling,
     get_patient_profile,
-    list_known_patients,
+    issue_guardian_token,
     list_patients,
-    upsert_lab_result,
     verify_guardian_binding,
 )
-from .his import issue_guardian_token
 
 mcp = FastMCP("CKDNutri-clinical-data-mcp")
 
 
 def _invalid(exc):
     if isinstance(exc, CallerError):
-        raise
+        # BUG-54（2026-08-12）：越权/身份未解析统一返回 FORBIDDEN 信封（与 clinical-data
+        # _guard_access / care _guard 同格式），不再向上抛导致 500。PermissionDenied 带
+        # caller/action/reason，CallerUnknown 缺字段时降级文案。
+        return {"ok": False, "error": "FORBIDDEN",
+                "detail": f"caller={getattr(exc, 'caller', '?')} 无权 {getattr(exc, 'action', 'access')}"
+                          f"（{getattr(exc, 'reason', str(exc))}）"}
     return {"ok": False, "error": "INVALID_INPUT", "detail": str(exc)}
 
 
