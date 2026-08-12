@@ -18,6 +18,8 @@ from .reference import (
 
 # 变化幅度低于该比例视为持平，避免检测误差被读成趋势
 FLAT_TOLERANCE = 0.05
+# BUG-67 后补（2026-08-12）：前值接近 0 时按持平处理（防除零抖动），见 trend_code
+_EPSILON = 1e-10
 
 TREND_ARROW = {"up": "↑", "down": "↓", "flat": "→"}
 
@@ -53,8 +55,12 @@ def decorate_panel(panel: dict[str, Any], age: float, sex: str) -> dict[str, Any
 
 
 def trend_code(current: float, previous: float | None, analyte: str) -> str:
-    """相对上一次采样的方向。previous 缺失时按持平处理。"""
-    if previous is None or previous == 0:
+    """相对上一次采样的方向。previous 缺失或接近 0 时按持平处理。
+
+    BUG-67 后补（2026-08-12）：previous==0 精确比较改为 abs(previous) < EPSILON——
+    前值极小时（如肌酐 0.0001）abs(previous) 作分母数值不稳定，且零点附近无趋势意义。
+    """
+    if previous is None or abs(previous) < _EPSILON:
         return "flat"
     change = (current - previous) / abs(previous)
     if change > FLAT_TOLERANCE:

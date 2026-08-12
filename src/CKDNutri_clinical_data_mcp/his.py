@@ -111,9 +111,22 @@ def _load_guardian_tokens() -> dict[str, Any]:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        # BUG-67 后补（2026-08-12）：令牌库损坏禁止静默返回 {}——否则所有家长绑定
+        # 失效（"降级为无绑定"），且 issue_guardian_token 会用新令牌覆盖旧数据；
+        # 抛 RuntimeError（server._invalid 归 INTERNAL_ERROR），运维可恢复备份。
+        raise RuntimeError(
+            f"监护人令牌库 {GUARDIAN_TOKEN_STORE} JSON 损坏，拒绝加载"
+            f"（防止绑定状态静默失效），请检查磁盘/恢复备份: {exc}") from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 读取失败: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 数据类型错误：期望 dict，"
+            f"实际为 {type(data).__name__}，拒绝加载")
+    return data
 
 
 def _save_guardian_tokens(tokens: dict[str, Any]) -> None:

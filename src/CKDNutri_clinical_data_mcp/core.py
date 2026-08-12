@@ -174,6 +174,15 @@ def get_critical_values(
 # --- 工具 3：get_lab_trend --------------------------------------------------
 
 def _within_window(panels: list[dict[str, Any]], window_days: int) -> list[dict[str, Any]]:
+    """过滤出距最新采样不超过 window_days 天的面板。
+
+    时间口径约定（2026-08-12 明确）：
+    - report_date 为**自然日（日历日）**，YYYY-MM-DD 纯日期、**无时区语义**——
+      models.LabResultIn 强制 date 类型，date.fromisoformat 不涉及时区解析；
+      纯日期不含时分秒，不存在时区偏移/跨日边界不一致问题。
+    - 窗口终点 = **最新面板日期**（以数据时间线为基准），而非"今天"；
+      如需"相对今天"的窗口，由调用方先行过滤后再传入。
+    """
     if not panels:
         return panels
     end = date.fromisoformat(panels[-1]["report_date"])
@@ -255,8 +264,31 @@ def get_lab_trend(
 
 # --- 工具 4：upsert_lab_result（写权仅 doctor_assistant）--------------------
 
+def _contract_bounds(analyte: str) -> tuple[float | None, float | None]:
+    """从 LabResultIn 模型字段提取契约数值边界 (ge, le)。
+
+    单一事实源在 models.py（Field ge/le），此处动态读取避免重复硬编码——归一化后的
+    契约值必须落在模型定义的合理范围内，防止别名输入绕过契约上限（BUG-67 后补）。
+    """
+    field = LabResultIn.model_fields.get(analyte)
+    if field is None:
+        return (None, None)
+    ge = le = None
+    for md in field.metadata:
+        if hasattr(md, "ge"):
+            ge = md.ge
+        if hasattr(md, "le"):
+            le = md.le
+    return (ge, le)
+
+
 def _normalize(lab: LabResultIn) -> tuple[dict[str, float], list[str]]:
-    """把别名口径换算成契约单位，返回 (契约值, 换算说明)。"""
+    """把别名口径换算成契约单位，返回 (契约值, 换算说明)。
+
+    BUG-67 后补（2026-08-12）：别名换算后的契约值须落在模型契约范围（ge/le）内——
+    models 只校验输入字段自身范围（如 scr_mg_dL ≤ 40），换算后 scr_umol_L 可能超 3000
+    上限（40mg/dL × 88.4 = 3536）绕过校验写入脏数据；此处二次校验，超界抛 ValueError。
+    """
     raw = lab.model_dump(exclude_none=True)
     values: dict[str, float] = {k: float(v) for k, v in raw.items() if k in ANALYTES}
     conversions: list[str] = []
@@ -267,6 +299,11 @@ def _normalize(lab: LabResultIn) -> tuple[dict[str, float], list[str]]:
         if target in values:
             conversions.append(f"{alias} 与 {target} 同时给出，以契约字段 {target} 为准")
             continue
+        ge, le = _contract_bounds(target)
+        if (le is not None and converted > le) or (ge is not None and converted < ge):
+            raise ValueError(
+                f"{alias}={raw[alias]} 归一化为 {target}={converted}，"
+                f"超出契约范围 [{ge}, {le}]，拒绝写入")
         values[target] = converted
         conversions.append(f"{alias}={raw[alias]} 归一化为 {target}={converted}")
     return values, conversions
@@ -299,7 +336,12 @@ def upsert_lab_result(
     if patient is None:
         return not_found(request.patient_id)
 
-    values, conversions = _normalize(request.lab)
+    try:
+        values, conversions = _normalize(request.lab)
+    except ValueError as exc:
+        # BUG-67 后补：别名换算后超出契约范围（如 scr_mg_dL=40 → scr_umol_L=3536 > 3000）
+        # 由 _normalize 抛 ValueError，此处转 INVALID_ARGUMENT 信封（回滚模式同路径）。
+        return fail("INVALID_ARGUMENT", str(exc))
     if not values:
         return fail("INVALID_ARGUMENT", "lab 中未提供任何可识别的检验指标")
 

@@ -92,8 +92,17 @@ def load_store() -> list[dict[str, Any]]:
         return []
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as exc:
+        # BUG-67（2026-08-12）：损坏文件禁止静默返回 []——否则 append_record 会
+        # load_store→[]→append→atomic_write 用"仅新记录"覆盖整个写库，历史采样永久丢失。
+        # 抛 RuntimeError（server._invalid 归 INTERNAL_ERROR），运维可发现并恢复备份。
+        raise RuntimeError(
+            f"检验写库 {STORE_FILENAME} JSON 损坏，拒绝加载（防止静默清空），"
+            f"请检查磁盘/恢复备份: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"检验写库 {STORE_FILENAME} 数据类型错误：期望 dict，"
+            f"实际为 {type(payload).__name__}，拒绝加载（防止静默清空）")
     records = payload.get("records", [])
     return records if isinstance(records, list) else []
 

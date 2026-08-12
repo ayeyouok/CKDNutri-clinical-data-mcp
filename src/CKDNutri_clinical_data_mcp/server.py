@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import json
+
 from typing import Any
 
 from fastmcp import FastMCP
@@ -41,6 +43,12 @@ def _invalid(exc):
         return {"ok": False, "error": "FORBIDDEN",
                 "detail": f"caller={getattr(exc, 'caller', '?')} 无权 {getattr(exc, 'action', 'access')}"
                           f"（{getattr(exc, 'reason', str(exc))}）"}
+    # BUG-67（2026-08-12）：补 INTERNAL_ERROR 分类——P1 在 BUG-52 轮遗漏（其余 4 域包已加）。
+    # store.load_store 损坏抛 RuntimeError、FileNotFoundError/OSError/JSONDecodeError 均属
+    # 服务端数据/环境错误，误归 INVALID_INPUT(400) 会误导编排层以为是入参不合法。
+    if isinstance(exc, (FileNotFoundError, OSError, json.JSONDecodeError, RuntimeError)):
+        return {"ok": False, "error": "INTERNAL_ERROR",
+                "detail": f"内部数据/环境错误：{exc}"}
     return {"ok": False, "error": "INVALID_INPUT", "detail": str(exc)}
 
 

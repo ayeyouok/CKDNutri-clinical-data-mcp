@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from datetime import date
 
 from a207_policy import CallerUnknown, as_caller
 from harness import PKG_ROOT, SRC, check
@@ -17,12 +18,16 @@ from CKDNutri_clinical_data_mcp.reference import ANALYTES, reference_interval
 DENIED_WRITERS = ("parent_assistant", "nutritionist", "child_companion",
                   "risk_warning", "orchestrator", "unknown_agent")
 
+# BUG-67 后补（2026-08-12）：report_date 校验拒绝未来日期后，测试夹具改用动态"今天"——
+# 基线数据最新 2026-08-01，今天(>=08-12) 仍排在末位，测试语义不变；避免硬编码未来日期被校验拦截。
+_TODAY = date.today().isoformat()
+
 
 @check("upsert_lab_result / doctor_assistant 写入成功且要求重评")
 def _upsert_ok():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P0013", {"report_date": "2026-08-20", "k_mmol_L": 5.4, "p_mmol_L": 2.0, "hb_g_L": 108},
+            "P0013", {"report_date": _TODAY, "k_mmol_L": 5.4, "p_mmol_L": 2.0, "hb_g_L": 108},
         )
     assert res["ok"] is True, res
     assert res["recommend_reevaluate"] is True, res
@@ -41,7 +46,7 @@ def _upsert_readback():
     with as_caller("doctor_assistant"):
         res = core.get_labs("P0013")
     last = res["data"]["panels"][-1]
-    assert last["report_date"] == "2026-08-20", last
+    assert last["report_date"] == _TODAY, last
     assert last["source"] == "upsert", last
     analytes = {r["analyte"] for r in last["results"]}
     assert {"k_mmol_L", "p_mmol_L", "hb_g_L"} <= analytes, analytes
@@ -50,7 +55,7 @@ def _upsert_readback():
 @check("upsert 后趋势序列纳入新点")
 def _upsert_trend():
     trend = core.get_lab_trend("P0013", "k_mmol_L")["data"]
-    assert trend["points"][-1]["report_date"] == "2026-08-20"
+    assert trend["points"][-1]["report_date"] == _TODAY
     assert trend["latest"] == 5.4, trend["latest"]
 
 
@@ -59,7 +64,7 @@ def _upsert_dryrun():
     before = len(store.load_store())
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P0014", {"report_date": "2026-08-21", "k_mmol_L": 4.8},
+            "P0014", {"report_date": _TODAY, "k_mmol_L": 4.8},
             write_mode=False,
         )
     assert res["ok"] is True and res["recommend_reevaluate"] is True, res
@@ -71,7 +76,7 @@ def _upsert_dryrun():
 def _upsert_units():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P0015", {"report_date": "2026-08-22", "scr_mg_dL": 2.0, "ca_mg_dL": 9.0},
+            "P0015", {"report_date": _TODAY, "scr_mg_dL": 2.0, "ca_mg_dL": 9.0},
             write_mode=False,
         )
     assert res["ok"] is True, res
@@ -84,7 +89,7 @@ def _upsert_units():
 def _upsert_conflict():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P0015", {"report_date": "2026-08-22", "scr_umol_L": 200.0, "scr_mg_dL": 9.9},
+            "P0015", {"report_date": _TODAY, "scr_umol_L": 200.0, "scr_mg_dL": 9.9},
             write_mode=False,
         )
     assert res["ok"] is True, res
@@ -95,7 +100,7 @@ def _upsert_conflict():
 def _upsert_critical():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P0016", {"report_date": "2026-08-23", "k_mmol_L": 7.2},
+            "P0016", {"report_date": _TODAY, "k_mmol_L": 7.2},
             write_mode=False,
         )
     assert res["ok"] is True
@@ -107,7 +112,7 @@ def _upsert_critical():
 def _upsert_parent():
     with as_caller("parent_assistant"):
         res = core.upsert_lab_result(
-            "P0013", {"report_date": "2026-08-20", "k_mmol_L": 4.5},
+            "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5},
         )
     assert res["ok"] is False, res
     assert res["error"] == "FORBIDDEN", res
@@ -119,7 +124,7 @@ def _upsert_others():
     for caller in DENIED_WRITERS:
         with as_caller(caller):
             res = core.upsert_lab_result(
-                "P0013", {"report_date": "2026-08-20", "k_mmol_L": 4.5}
+                "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5}
             )
         assert res["ok"] is False and res["error"] == "FORBIDDEN", (caller, res)
 
@@ -130,7 +135,7 @@ def _upsert_no_side_effect():
     for caller in DENIED_WRITERS:
         with as_caller(caller):
             core.upsert_lab_result(
-                "P0013", {"report_date": "2026-08-25", "k_mmol_L": 4.5}
+                "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5}
             )
     assert len(store.load_store()) == before, "越权调用仍然改动了写库"
 
@@ -139,7 +144,7 @@ def _upsert_no_side_effect():
 def _upsert_extra():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P0013", {"report_date": "2026-08-20", "k_mmol_L": 4.5, "cholesterol": 5.0},
+            "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5, "cholesterol": 5.0},
             write_mode=False,
         )
     assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
@@ -149,7 +154,7 @@ def _upsert_extra():
 def _upsert_range():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P0013", {"report_date": "2026-08-20", "k_mmol_L": 99},
+            "P0013", {"report_date": _TODAY, "k_mmol_L": 99},
             write_mode=False,
         )
     assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
@@ -159,7 +164,7 @@ def _upsert_range():
 def _upsert_empty():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P0013", {"report_date": "2026-08-20"}, write_mode=False
+            "P0013", {"report_date": _TODAY}, write_mode=False
         )
     assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
 
@@ -168,7 +173,7 @@ def _upsert_empty():
 def _upsert_404():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
-            "P8888", {"report_date": "2026-08-20", "k_mmol_L": 4.5},
+            "P8888", {"report_date": _TODAY, "k_mmol_L": 4.5},
         write_mode=False,
     )
     assert res["ok"] is False and res["error"] == "NOT_FOUND", res

@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "CKDNutri-clinical-data-mcp"
-version = "0.3.18"
+version = "0.3.19"
 description = "P1 临床数据域——患儿档案+化验面板"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=2.0",
     "pydantic>=2",
-    "a207-policy==0.3.16",
+    "a207-policy>=0.3.17",
 ]
 
 [project.scripts]
