@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -71,22 +73,24 @@ _PARENT_HIDDEN_FIELDS = (CLINICIAN_ONLY_FIELDS | P1_PARENT_HIDDEN_FIELDS) - {"nu
 _PARENT_WITHHELD_DOC = P1_PARENT_HIDDEN_FIELDS | {"z_score_height", "stage_confirmed_by"}
 
 
-def _strip_parent_sensitive(obj: Any, removed: set[str]) -> Any:
+def _strip_parent_sensitive(obj: Any) -> Any:
     """递归剥除家长不可见的敏感键（F3 单一事实源）。
 
-    遍历 dict/list，凡是键名落在 _PARENT_HIDDEN_FIELDS 的逐项移除并记录，确保未来新增的敏感字段
+    遍历 dict/list，凡是键名落在 _PARENT_HIDDEN_FIELDS 的逐项移除，确保未来新增的敏感字段
     也会自动从家长视图剥离，不再依赖手写白名单（杜绝双轨漂移）。
+
+    2026-08-12：移除 removed 收集参数（死代码）——withheld 声明走中央集合
+    _PARENT_WITHHELD_DOC（覆盖未挂载的大块字段如 biochemistry/food_diary_5d），
+    动态 removed 反而无法覆盖"未挂载即隐藏"的字段，无消费者。
     """
     if isinstance(obj, dict):
-        out: dict[str, Any] = {}
-        for k, v in obj.items():
-            if k in _PARENT_HIDDEN_FIELDS:
-                removed.add(k)
-            else:
-                out[k] = _strip_parent_sensitive(v, removed)
-        return out
+        return {
+            k: _strip_parent_sensitive(v)
+            for k, v in obj.items()
+            if k not in _PARENT_HIDDEN_FIELDS
+        }
     if isinstance(obj, list):
-        return [_strip_parent_sensitive(v, removed) for v in obj]
+        return [_strip_parent_sensitive(v) for v in obj]
     return obj
 
 # --- 监护人令牌状态库（修复 F1：取代可被 patient_id 直接伪造的 "guardian_<id>" 常量）---
@@ -133,14 +137,27 @@ def _save_guardian_tokens(tokens: dict[str, Any]) -> None:
     atomic_write_json(_guardian_store_path(), tokens)
 
 
-def issue_guardian_token(patient_id: str, issuer: str | None = None) -> dict[str, Any]:
+# 令牌库并发保护（2026-08-12）：issue_guardian_token 的 load→改→save RMW 序列在
+# 单进程多线程并发签发下会 Lost Update（两请求各读旧库、后写覆盖前写），持锁串行化。
+_TOKEN_LOCK = threading.Lock()
+
+
+def issue_guardian_token(patient_id: str) -> dict[str, Any]:
     """签发监护人令牌（仅 doctor_assistant）。
 
     生成服务端随机令牌（不可由 patient_id 推导），按 patient_id 持久化到状态库。
     家长端经安全渠道获取后，调用 verify_guardian_binding 提交以完成绑定核验。
     重复调用将轮换（覆盖）该患儿令牌。
+
+    P0-1（2026-08-12 修复）：**禁止入参覆盖身份**——此前提供 issuer 参数且
+    caller = issuer or get_caller()，任意调用方可传 issuer="doctor_assistant"
+    自证身份绕过签发限制。现强制 get_caller()（部署注入），并补 _guard_access
+    写权中枢校验（enforce_write + 矩阵 R/W 回查，与 care 双轨制清理同口径）。
     """
-    caller = issuer or get_caller()
+    caller = get_caller()
+    denied = _guard_access("issue_guardian_token", write=True)
+    if denied:
+        return denied
     if caller not in GUARDIAN_ISSUERS:
         return _err("FORBIDDEN",
                     f"caller={caller} 无权签发监护人令牌（仅 {sorted(GUARDIAN_ISSUERS)}）")
@@ -149,15 +166,16 @@ def issue_guardian_token(patient_id: str, issuer: str | None = None) -> dict[str
     if _lookup(patient_id) is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
     token = secrets.token_urlsafe(GUARDIAN_TOKEN_BYTES)
-    tokens = _load_guardian_tokens()
-    now = datetime.now(timezone.utc)
-    tokens[patient_id] = {
-        "token": token,
-        "issued_at": now.isoformat(timespec="seconds"),
-        "expires_at": (now + timedelta(days=GUARDIAN_TOKEN_TTL_DAYS)).isoformat(timespec="seconds"),
-        "issued_by": caller,
-    }
-    _save_guardian_tokens(tokens)
+    with _TOKEN_LOCK:  # BUG（2026-08-12）：RMW 持锁防并发签发 Lost Update
+        tokens = _load_guardian_tokens()
+        now = datetime.now(timezone.utc)
+        tokens[patient_id] = {
+            "token": token,
+            "issued_at": now.isoformat(timespec="seconds"),
+            "expires_at": (now + timedelta(days=GUARDIAN_TOKEN_TTL_DAYS)).isoformat(timespec="seconds"),
+            "issued_by": caller,
+        }
+        _save_guardian_tokens(tokens)
     return {
         "ok": True,
         "data": {
@@ -187,7 +205,13 @@ def _data_path() -> Path:
 
 
 def load_dataset(force_reload: bool = False) -> dict[str, Any]:
-    """读取并缓存 patients.json。数据集缺失时抛错，不返回空集合掩盖问题。"""
+    """读取并缓存 patients.json。数据集缺失时抛错，不返回空集合掩盖问题。
+
+    2026-08-12（并发加固）：缓存更新由原位 _CACHE.clear()+update() 改为**整体替换**
+    _CACHE = {...}（模块级引用赋值原子）——并发读不再可能看到 clear 后的中间态
+    （此前 force_reload 与 _index() 并发会命中 _CACHE["index"] KeyError）。
+    """
+    global _CACHE
     path = _data_path()
     key = str(path)
     if force_reload or _CACHE.get("path") != key:
@@ -198,8 +222,7 @@ def load_dataset(force_reload: bool = False) -> dict[str, Any]:
         index = {p["patient_id"]: p for p in raw["patients"]}
         if len(index) != len(raw["patients"]):
             raise ValueError("患者数据集存在重复 patient_id，拒绝加载")
-        _CACHE.clear()
-        _CACHE.update({"path": key, "raw": raw, "index": index})
+        _CACHE = {"path": key, "raw": raw, "index": index}
     return _CACHE["raw"]
 
 
@@ -296,6 +319,9 @@ def get_patient_profile(patient_id: str,
         "patient_id": p["patient_id"],
         "data_scope": scope,
         "as_of": load_dataset()["as_of"],
+        # units 为基础名元数据（数据 schema 展示用，键如 "scr"/"potassium"，与 values
+        # 的契约键 "scr_umol_L"/"k_mmol_L" 不同空间）；单位解析唯一事实源 =
+        # reference.ANALYTES（契约键 → label/unit），勿按 values 键在 units 中查找。
         "units": load_dataset()["units"],
         "demographics": _demographics_block(p, scope),
         "diagnosis": _diagnosis_block(p),
@@ -312,8 +338,7 @@ def get_patient_profile(patient_id: str,
     else:
         # 家长受限视图（F3）：以 a207_policy 单一事实源递归剥敏感键，withheld 声明引用中央集合
         # BUG-31：删除退役角色 limited_nutritionist 分支（nutritionist 已退役）
-        removed: set[str] = set()
-        data = _strip_parent_sensitive(data, removed)
+        data = _strip_parent_sensitive(data)
         data["withheld"] = sorted(_PARENT_WITHHELD_DOC)
         data["withheld_reason"] = (
             "家长受限视图仅含诊断、过敏与医生设定上限；脱敏基准见 a207_policy "
@@ -341,17 +366,29 @@ def get_diagnosis(patient_id: str,
         "diet_restrictions": list(p["diet_restrictions"]),
         "note": MX1_NOTE,
     }
-    # F3：家长视图递归剥敏感键（如 stage_confirmed_by），与 get_patient_profile 统一基准
+    # F3：家长视图递归剥敏感键（如 stage_confirmed_by），与 get_patient_profile 统一基准；
+    # 2026-08-12（二次审查）：补 withheld 显式声明——设计约束"受限视图不静默丢字段：
+    # 被裁剪的内容在 withheld 中显式列出"。用中央集合 _PARENT_WITHHELD_DOC（与
+    # get_patient_profile 同源，防硬编码清单漂移）。
     if _scope_of(caller) == "limited_parent":
-        removed: set[str] = set()
-        payload = _strip_parent_sensitive(payload, removed)
+        payload = _strip_parent_sensitive(payload)
+        payload["withheld"] = sorted(_PARENT_WITHHELD_DOC)
     return {"ok": True, "data": payload}
 
 
-def verify_guardian_binding(patient_id: str, guardian_token: str) -> dict[str, Any] :
-    """家长身份核验。患者不存在与 token 不符统一返回 bound=false，避免枚举患者。"""
+def verify_guardian_binding(patient_id: str, guardian_token: str) -> dict[str, Any]:
+    """家长身份核验。患者不存在与 token 不符统一返回 bound=false，避免枚举患者。
+
+    2026-08-12（二次审查）：补齐 _guard_access 读权中枢校验——此前本接口是模块内
+    唯一未走 a207_policy.enforce_read 的 Tool 入口（其余 get_patient_profile/
+    get_diagnosis/list_patients/get_nutrition_ceiling/issue_guardian_token 均显式调用），
+    矩阵若对该 Tool 收紧将无法生效。家长矩阵为 ACCESS_READ，补闸后仍可正常调用。
+    """
     # P0-1：身份必须由部署环境注入，未注入即 fail-closed；本接口的放行范围维持原状不收紧。
     caller = get_caller()
+    denied = _guard_access("verify_guardian_binding")
+    if denied:
+        return denied
     if not isinstance(guardian_token, str) or not guardian_token:
         return _err("INVALID_ARGUMENT", "guardian_token 不能为空")
     p = _lookup(patient_id)
@@ -367,11 +404,51 @@ def verify_guardian_binding(patient_id: str, guardian_token: str) -> dict[str, A
     }
 
 
+def _validate_filter(criteria: dict[str, Any]) -> str | None:
+    """统一校验 list_patients 筛选值（fail-closed）。非法返回错误 detail，合法返回 None。
+
+    2026-08-12（二次审查）拦截三类隐患：
+    - has_allergies 字符串：bool("false")=True 误判 → 仅接受 bool 或 "true"/"false"；
+    - min/max_age_years 传 bool（float(True)=1.0 绕过类型拦截）或 NaN/inf
+      （比较语义异常）→ 拒绝 bool、要求 math.isfinite；
+    - 枚举值（age_band/ckd_stage/...）含不可哈希元素（如 dict）→ set(values) TypeError
+      → 要求元素为标量。
+    """
+    for k, v in criteria.items():
+        if k in ("age_band", "ckd_stage", "dialysis", "sex", "primary_disease"):
+            items = v if isinstance(v, (list, tuple, set)) else [v]
+            for it in items:
+                if isinstance(it, (dict, list, tuple, set)):
+                    return f"{k} 的值必须为字符串或字符串列表，收到 {it!r}"
+        elif k == "has_allergies":
+            if isinstance(v, str):
+                if v.strip().lower() not in ("true", "false"):
+                    return f"has_allergies 必须为布尔值或 'true'/'false'，收到 {v!r}"
+            elif not isinstance(v, bool):
+                return f"has_allergies 必须为布尔值或 'true'/'false'，收到 {v!r}"
+        elif k in ("min_age_years", "max_age_years"):
+            if isinstance(v, bool):
+                return f"{k} 不能为布尔值，收到 {v!r}"
+            try:
+                val = float(v)
+            except (TypeError, ValueError):
+                return f"{k} 必须是数字，收到 {v!r}"
+            if not math.isfinite(val):
+                return f"{k} 必须是有限数值，收到 {v!r}"
+    return None
+
+
 def _match(p: dict[str, Any], key: str, want: Any) -> bool:
     if key in ("age_band", "ckd_stage", "dialysis", "sex", "primary_disease"):
         values = want if isinstance(want, (list, tuple, set)) else [want]
-        return p[key] in set(values)
+        try:
+            return p[key] in set(values)
+        except TypeError:
+            # 防御纵深：入口 _validate_filter 已拦不可哈希元素，此处双保险（fail-open 不匹配）
+            return False
     if key == "has_allergies":
+        # 入口 _validate_filter 已把字符串规范化为 bool，此处仅防御非 bool 输入
+        want = want.strip().lower() == "true" if isinstance(want, str) else want
         return bool(p["allergies"]) is bool(want)
     if key == "min_age_years":
         return p["age_years"] >= float(want)
@@ -396,6 +473,10 @@ def list_patients(filter: dict[str, Any] | None = None) -> dict[str, Any]:
     if unknown:
         return _err("INVALID_FILTER",
                     f"不支持的筛选键 {unknown}；可用键 {sorted(ALLOWED_FILTER_KEYS)}")
+    # 筛选值统一校验（2026-08-12 二次审查）：bool/不可哈希/NaN-inf 拦截 → INVALID_FILTER
+    err = _validate_filter(criteria)
+    if err:
+        return _err("INVALID_FILTER", err)
 
     rows = []
     for p in load_dataset()["patients"]:

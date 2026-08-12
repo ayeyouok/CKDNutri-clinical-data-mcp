@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
@@ -62,11 +63,16 @@ def store_path() -> Path:
 
 
 def load_dataset(refresh: bool = False) -> dict[str, Any]:
-    """载入只读基线数据集（进程内缓存）。
+    """载入只读基线数据集（进程内缓存，返回深拷贝副本）。
 
     优先使用随包内联的基线模块（_labs_baseline.py），保证在任意部署环境
     （本地 / 云沙箱 / 容器）都能自包含加载，无需外部 data/labs.json。
     仅当内联模块缺失时，才回退到文件读取（兼容源码开发态）。
+
+    2026-08-12（数据污染加固）：此前直接返回 _DATASET_CACHE 引用（= _EMBEDDED_BASELINE，
+    即模块级全局 BASELINE）——下游对返回数据的任何原地修改（如 get_lab_trend 对 panels
+    排序、merged_panels 修改 panel dict）都会污染全局缓存，引发跨请求数据错乱。
+    现改为返回 copy.deepcopy：36 患儿 112 面板量级开销可忽略，调用方拥有独立副本。
     """
     global _DATASET_CACHE
     with _LOCK:
@@ -82,7 +88,7 @@ def load_dataset(refresh: bool = False) -> dict[str, Any]:
                         f"或在运行环境设置环境变量 A207_LIS_DATA_DIR 指向含 labs.json 的目录。"
                     )
                 _DATASET_CACHE = json.loads(path.read_text(encoding="utf-8"))
-        return _DATASET_CACHE
+        return copy.deepcopy(_DATASET_CACHE)
 
 
 def load_store() -> list[dict[str, Any]]:
@@ -143,11 +149,18 @@ def merged_panels(patient_id: str) -> list[dict[str, Any]]:
     for record in load_store():
         if record.get("patient_id") != patient_id:
             continue
-        by_sample[record["sample_id"]] = {
-            "sample_id": record["sample_id"],
+        # S7（2026-08-12 五包审查）：写库记录 .get() 防御——早期版本/手工写入的记录
+        # 可能缺 sample_id/report_date/values 键，硬索引会 KeyError（且被 server _invalid
+        # 误归 INVALID_INPUT）；缺关键字段的脏记录跳过合并（不影响基线展示）。
+        sid = record.get("sample_id")
+        values = record.get("values")
+        if sid is None or record.get("report_date") is None or not isinstance(values, dict):
+            continue
+        by_sample[sid] = {
+            "sample_id": sid,
             "report_date": record["report_date"],
             "specimen": record.get("specimen"),
-            "values": record["values"],
+            "values": values,
             "source": "upsert",
             "recorded_by": record.get("recorded_by"),
         }

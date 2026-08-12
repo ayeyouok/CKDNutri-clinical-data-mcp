@@ -70,9 +70,13 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
     panels = merged_panels(query.patient_id)
     age, sex = float(patient["age_years"]), patient["sex"]
 
+    # 空数据统一 NO_DATA（2026-08-12）：此前仅 READ_LIMITED 家长分支返回 no_data、
+    # READ_FULL 医生返回 ok:True+panel_count:0——信封不对称。对齐 get_critical_values
+    # 模式，在角色分支前统一返回：无检验记录 = NO_DATA 提示，非"合法空结果"。
+    if not panels:
+        return no_data(query.patient_id)
+
     if caller in READ_LIMITED:
-        if not panels:
-            return no_data(query.patient_id)
         latest = panels[-1]
         previous = panels[-2] if len(panels) >= 2 else None
         items = parent_view_items(latest, previous, age, sex)
@@ -236,6 +240,10 @@ def get_lab_trend(
     panels = merged_panels(query.patient_id)
     if query.window_days is not None:
         panels = _within_window(panels, query.window_days)
+    # 空数据统一 NO_DATA（对齐 get_critical_values L136 / get_labs）：角色分支之前、
+    # 家长/医生双方同构——"无检验记录"或"窗口内无采样"不是"趋势平坦"，应明确提示。
+    if not panels:
+        return no_data(query.patient_id)
 
     # BUG-06：家长仅可见趋势方向受限视图（需求 P1 家庭=✔ 仅方向），不落 READ_FULL
     if caller not in READ_FULL:

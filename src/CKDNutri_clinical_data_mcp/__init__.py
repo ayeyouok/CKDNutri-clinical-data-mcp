@@ -18,10 +18,17 @@ from importlib import metadata as _metadata
 
 
 def _pkg_version() -> str:
-    """从安装元数据读取版本（P2-6：与 pyproject.toml 单一事实源对齐）。未安装时回退 "0.0.0"。"""
+    """从安装元数据读取版本（P2-6：与 pyproject.toml 单一事实源对齐）。未安装时回退 "0.0.0"。
+
+    2026-08-12 加固：本函数在模块 import 顶层执行（__version__ = _pkg_version()），
+    任何未捕获异常都会让包加载失败、服务无法启动。除 PackageNotFoundError（未安装）、
+    TypeError / AttributeError（异常 metadata 实现）外，损坏的 .dist-info / 特殊运行时
+    还可能抛 ValueError 等——版本号仅审计展示，缺失回退 "0.0.0" 无功能影响，
+    故通配兜底（fail-open：宁可无版本号，不可阻断加载）。
+    """
     try:
         return _metadata.version("CKDNutri-clinical-data-mcp")
-    except _metadata.PackageNotFoundError:
+    except Exception:  # noqa: BLE001 - 通配兜底（见 docstring 理由）
         return "0.0.0"
 
 
