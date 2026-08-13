@@ -210,6 +210,14 @@ class LocalJsonRepository:
     def append_lab_record(self, record: dict[str, Any]) -> int:
         with _FILE_LOCK:
             records = self._load_records()
+            # B1 修复（2026-08-13）：与 Tablestore 端同口径——sample_id 已存在拒绝覆盖
+            # （此前直接 append，并发/重复提交会落两条同 sample_id → get_panels 按
+            # sample_id 合并时后写覆盖先写，等价于丢一条）。
+            sid = record.get("sample_id")
+            if any(r.get("sample_id") == sid for r in records):
+                raise RuntimeError(
+                    f"sample_id={sid} 已存在（并发冲突或重复提交），拒绝覆盖写入；"
+                    f"请更换 sample_id 或确认是否为重复请求")
             records.append(record)
             self._save_records(records)
         return len(records)
@@ -295,6 +303,21 @@ class TablestoreRepository:
 
         condition = Condition(RowExistenceExpectation.IGNORE)
         # SDK 不支持 None 属性值：过滤掉（缺列等价于 JSON 里缺键，读取侧容错）
+        clean = {k: v for k, v in attrs.items() if v is not None}
+        row = Row(pk, list(clean.items()))
+        self._get_client().put_row(table, row, condition)
+
+    def _put_row_not_exist(self, table: str, pk: list[tuple[str, str]],
+                           attrs: dict[str, Any]) -> None:
+        """条件写：主键**不得已存在**（EXPECT_NOT_EXIST），已存在抛 OTSClientError。
+
+        B1 修复（2026-08-13）：append_lab_record 不再覆盖写——若调用方显式传入的
+        sample_id 与既有行撞主键，必须报错暴露冲突，绝不静默覆盖（丢数据）。
+        服务端生成的 uuid sample_id 理论上不撞，但此条件写是最后一道防线。
+        """
+        from tablestore import Condition, Row, RowExistenceExpectation
+
+        condition = Condition(RowExistenceExpectation.EXPECT_NOT_EXIST)
         clean = {k: v for k, v in attrs.items() if v is not None}
         row = Row(pk, list(clean.items()))
         self._get_client().put_row(table, row, condition)
@@ -461,8 +484,19 @@ class TablestoreRepository:
             "source": "upsert",
             "recorded_by": record.get("recorded_by"),
         }
-        self._put_row(TABLE_LABS_STORE,
-                      self._pk_lab(record["patient_id"], sid), attrs)
+        # B1 修复（2026-08-13）：EXPECT_NOT_EXIST 条件写——主键已存在（sample_id 撞）
+        # 抛 OTSClientError 而非覆盖，杜绝并发写入静默丢数据。
+        try:
+            self._put_row_not_exist(TABLE_LABS_STORE,
+                                    self._pk_lab(record["patient_id"], sid), attrs)
+        except Exception as exc:
+            # SDK 条件不满足抛 OTSClientError；统一转成带业务语义的 RuntimeError
+            # （fail-closed：调用方看到的是"冲突"，而不是"写入成功但被覆盖"）。
+            if type(exc).__name__ == "OTSClientError":
+                raise RuntimeError(
+                    f"sample_id={sid} 已存在（并发冲突或重复提交），拒绝覆盖写入；"
+                    f"请更换 sample_id 或确认是否为重复请求") from exc
+            raise
         # 返回写库总条数（与 store.append_record 语义一致）
         return len([i for i in self._range_all(TABLE_LABS_STORE)
                     if i["pk"].get("patient_id") == record["patient_id"]])

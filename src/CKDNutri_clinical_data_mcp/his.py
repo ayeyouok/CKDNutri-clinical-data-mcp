@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
@@ -32,6 +31,7 @@ from a207_policy import (
     enforce_write,
     get_caller,
     resolve_state_path,
+    validate_patient_id,
     verify_guardian_token,
 )
 
@@ -44,7 +44,8 @@ def _repo():
 
 DEFAULT_DATA_FILE = Path(__file__).resolve().parent / "data" / "patients.json"
 DATA_FILE_ENV = "A207_HIS_DATA_FILE"
-PATIENT_ID_PATTERN = re.compile(r"^P[0-9]{4,}$")
+# S6 修复（2026-08-13）：patient_id 校验收敛到 a207_policy.validate_patient_id
+# （单一事实源），不再本地维护第二份正则——防两处正则漂移（一处改一处漏）。
 
 # F2（v2.3）：通用角色闸统一走 a207_policy.enforce_read / enforce_write 中枢（单一事实源），
 # 不再本地维护 caller not in X 的白/黑名单。家长 guardian_token 闸由 _guard_guardian 独立负责（F1/F4）。
@@ -152,7 +153,44 @@ def _save_guardian_tokens(tokens: dict[str, Any]) -> None:
 
 # 令牌库并发保护（2026-08-12）：issue_guardian_token 的 load→改→save RMW 序列在
 # 单进程多线程并发签发下会 Lost Update（两请求各读旧库、后写覆盖前写），持锁串行化。
+# P1-2 修复（2026-08-13）：_TOKEN_LOCK 仅护**单进程内**多线程；多实例部署（魔搭多副本）
+# 并发签发仍会跨进程 Lost Update（各读旧库、后写冲掉先写的绑定，家长被锁在数据外）。
+# 增加**跨进程文件锁**（与数据同目录的 .lock 文件，fcntl/msvcrt），RMW 全程持锁。
 _TOKEN_LOCK = threading.Lock()
+
+
+def _guardian_lock_path():
+    return _guardian_store_path().with_suffix(".json.lock")
+
+
+class _CrossProcessTokenLock:
+    """跨进程互斥（文件锁）：Windows msvcrt / POSIX fcntl 双平台。"""
+
+    def __enter__(self):
+        import os
+
+        self._fh = open(_guardian_lock_path(), "a+", encoding="utf-8")
+        try:
+            import msvcrt  # Windows
+
+            msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+        except ImportError:
+            import fcntl  # POSIX
+
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            import msvcrt
+
+            msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+        except ImportError:
+            import fcntl
+
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        self._fh.close()
+        return False
 
 
 def issue_guardian_token(patient_id: str) -> dict[str, Any]:
@@ -174,16 +212,20 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
     if caller not in GUARDIAN_ISSUERS:
         return _err("FORBIDDEN",
                     f"caller={caller} 无权签发监护人令牌（仅 {sorted(GUARDIAN_ISSUERS)}）")
-    if not isinstance(patient_id, str) or not PATIENT_ID_PATTERN.match(patient_id):
-        return _err("INVALID_ARGUMENT", f"patient_id={patient_id} 格式不合法")
+    # S6 修复：统一走 a207_policy.validate_patient_id（此前本地 PATIENT_ID_PATTERN）
+    try:
+        patient_id = validate_patient_id(patient_id)
+    except ValueError as exc:
+        return _err("INVALID_ARGUMENT", str(exc))
     if _repo().get_patient(patient_id) is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
     token = secrets.token_urlsafe(GUARDIAN_TOKEN_BYTES)
-    with _TOKEN_LOCK:  # BUG（2026-08-12）：RMW 持锁防并发签发 Lost Update
+    # P1-2 修复：进程内 _TOKEN_LOCK + 跨进程文件锁双重保护（多实例并发签发不丢绑定）
+    with _TOKEN_LOCK, _CrossProcessTokenLock():
         # v3.0（2026-08-13）：guardian_tokens 不落 Tablestore——家长绑定校验
         # （a207_policy.verify_guardian_token，跨包共享层）只读 JSON 文件，
         # 因此令牌库以 JSON 为**唯一事实源**，由本模块直接读写（不再经 repository）。
-        # 多实例部署的一致性靠 A207_GUARDIAN_TOKEN_DIR 指向共享持久目录保证。
+        # 多实例部署的一致性靠 A207_GUARDIAN_TOKEN_DIR 指向共享持久目录 + 文件锁保证。
         tokens = _load_guardian_tokens()
         now = datetime.now(timezone.utc)
         tokens[patient_id] = {
@@ -313,6 +355,11 @@ def get_patient_profile(patient_id: str,
     denied = _guard_access("get_patient_profile")
     if denied:
         return denied
+    # S6 修复：畸形 patient_id 不进存储层（此前未校验，直插 repository）
+    try:
+        patient_id = validate_patient_id(patient_id)
+    except ValueError as exc:
+        return _err("INVALID_ARGUMENT", str(exc))
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_patient_profile")
     if denied:
         return denied
@@ -360,6 +407,11 @@ def get_diagnosis(patient_id: str,
     denied = _guard_access("get_diagnosis")
     if denied:
         return denied
+    # S6 修复：畸形 patient_id 不进存储层
+    try:
+        patient_id = validate_patient_id(patient_id)
+    except ValueError as exc:
+        return _err("INVALID_ARGUMENT", str(exc))
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_diagnosis")
     if denied:
         return denied
@@ -396,6 +448,11 @@ def verify_guardian_binding(patient_id: str, guardian_token: str) -> dict[str, A
     denied = _guard_access("verify_guardian_binding")
     if denied:
         return denied
+    # S6 修复：畸形 patient_id 不进存储层（此前未校验，直插 repository）
+    try:
+        patient_id = validate_patient_id(patient_id)
+    except ValueError as exc:
+        return _err("INVALID_ARGUMENT", str(exc))
     if not isinstance(guardian_token, str) or not guardian_token:
         return _err("INVALID_ARGUMENT", "guardian_token 不能为空")
     p = _repo().get_patient(patient_id)
@@ -527,6 +584,11 @@ def get_nutrition_ceiling(patient_id: str,
     denied = _guard_access("get_nutrition_ceiling")
     if denied:
         return denied
+    # S6 修复：畸形 patient_id 不进存储层
+    try:
+        patient_id = validate_patient_id(patient_id)
+    except ValueError as exc:
+        return _err("INVALID_ARGUMENT", str(exc))
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_nutrition_ceiling")
     if denied:
         return denied

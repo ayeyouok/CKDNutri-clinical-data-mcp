@@ -306,3 +306,85 @@ def _list_patients_pagination():
     with as_caller("parent_assistant"):
         denied = his.list_patients()
     assert denied["ok"] is False and denied["error"] == "FORBIDDEN", denied
+
+
+@check("B2 / 家长视图键集合 ⊆ 白名单（deny-list 防新增敏感字段静默泄露）")
+def _b2_parent_allowlist():
+    """契约测试：家长受限视图返回的 JSON 键必须落在显式白名单内。
+
+    若未来新增医生专有字段而开发者忘记加入 CLINICIAN_ONLY_FIELDS，黑名单脱敏会
+    把它原样透给家长视图——本测试在 CI 卡死该回归（红），倒逼字段显式声明。
+    """
+    from a207_policy import CLINICIAN_ONLY_FIELDS, P1_PARENT_HIDDEN_FIELDS
+
+    # 家长视图允许出现的顶层键（白名单）。与 _strip_parent_sensitive 的黑名单互补：
+    # 黑名单保证"已知敏感键必剥"，白名单保证"未声明的键必拒"。
+    PARENT_TOP_ALLOWED = {
+        "patient_id", "data_scope", "as_of", "units", "demographics", "diagnosis",
+        "allergies", "diet_restrictions", "nutrition_ceiling", "withheld",
+        "withheld_reason", "ckd_stage", "ckd_stage_numeric", "primary_disease",
+        "dialysis", "dialysis_mode", "dialysis_label", "diagnosed_on",
+        "note", "age_years", "age_band", "age_band_label", "sex",
+        "height_cm", "weight_kg", "bmi", "edema",
+    }
+    tok = _parent_token("P0013")
+    with as_caller("parent_assistant"):
+        prof = his.get_patient_profile("P0013", guardian_token=tok)
+        diag = his.get_diagnosis("P0013", guardian_token=tok)
+    assert prof["ok"] is True and diag["ok"] is True, (prof, diag)
+
+    # ① 家长档案视图顶层键 ⊆ 白名单
+    leaked_top = set(prof["data"]) - PARENT_TOP_ALLOWED
+    assert not leaked_top, f"家长档案视图出现未声明顶层键（可能为新敏感字段泄露）：{leaked_top}"
+
+    # ② 递归收集家长视图全部叶子键，断言不含任何 CLINICIAN_ONLY_FIELDS 键
+    def _leaves(node):
+        found = set()
+        if isinstance(node, dict):
+            found.update(node.keys())
+            for v in node.values():
+                found |= _leaves(v)
+        elif isinstance(node, list):
+            for v in node:
+                found |= _leaves(v)
+        return found
+
+    leaves = _leaves(prof["data"]) | _leaves(diag["data"])
+    # nutrition_ceiling 是家长刻意放行字段（家长须知晓医生设定上限），从断言集合剔除
+    must_not_see = (CLINICIAN_ONLY_FIELDS | P1_PARENT_HIDDEN_FIELDS) - {"nutrition_ceiling"}
+    leaked = leaves & must_not_see
+    assert not leaked, (
+        f"家长视图泄露医生专有字段（CLINICIAN_ONLY_FIELDS/P1_PARENT_HIDDEN_FIELDS）："
+        f"{sorted(leaked)}。新增敏感字段必须显式加入 a207_policy 脱敏集合（单一事实源）。")
+
+    # ③ 核心叶子逐一断言（显式点名，防集合误配）
+    for key in ("scr_umol_L", "egfr_ml_min", "z_score_height", "stage_confirmed_by",
+                "food_diary_5d", "biochemistry", "medical_record_no", "dialysis_detail"):
+        assert key not in leaves, f"家长视图泄露字段 {key}"
+
+
+@check("S6 / 畸形 patient_id 在所有 HIS 工具入口被拒（INVALID_ARGUMENT）")
+def _s6_patient_id_validation():
+    """S6 修复回归：畸形 patient_id 不得进入存储/查询层。
+
+    此前 get_patient_profile / get_diagnosis / verify_guardian_binding /
+    get_nutrition_ceiling 未校验，畸形 id 直插 repository；现统一走
+    a207_policy.validate_patient_id（^P[0-9]{4,}$）。
+    """
+    bad_ids = ("", "  ", "P12", "P123", "p0007", "P0007X", "X0001", "1234",
+               "P-001", None, 12345)
+    with as_caller("doctor_assistant"):
+        for bad in bad_ids:
+            for tool in (his.get_patient_profile, his.get_diagnosis,
+                         his.get_nutrition_ceiling):
+                res = tool(bad)
+                assert res.get("error") == "INVALID_ARGUMENT", (tool.__name__, bad, res)
+            res = his.verify_guardian_binding(bad, "tok")
+            assert res.get("error") == "INVALID_ARGUMENT", ("verify", bad, res)
+            res = his.issue_guardian_token(bad)
+            assert res.get("error") == "INVALID_ARGUMENT", ("issue", bad, res)
+    # 合法 id 不受影响
+    with as_caller("doctor_assistant"):
+        assert his.get_patient_profile("P0013")["ok"] is True
+        assert his.verify_guardian_binding("P0013", "tok")["ok"] is True
+        assert his.issue_guardian_token("P0013")["ok"] is True

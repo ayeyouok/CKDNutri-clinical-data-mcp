@@ -44,6 +44,10 @@ os.environ["A207_GUARDIAN_TOKEN_DIR"] = str(TMP_DIR)
 
 
 # ---- 内存 Fake Tablestore 客户端（v3.0 单后端测试注入）----------------------
+class OTSClientError(Exception):
+    """模拟 tablestore.OTSClientError（类名与 SDK 一致，reposity 按 __name__ 识别）。"""
+
+
 class _FakeRow:
     """模拟 tablestore.Row：primary_key 为 [(名,值)]，attribute_columns 为 [(名,值,ts)]。"""
 
@@ -114,6 +118,17 @@ class FakeOtsClient:
             attrs = dict(cols)
         else:
             attrs = {n: v for n, v, _ in cols}
+        # B1 修复（2026-08-13）：模拟 SDK 条件写语义——EXPECT_NOT_EXIST 条件不满足
+        # （主键已存在）抛 OTSClientError，与真实 Tablestore 行为一致，保证并发压测
+        # 能真实捕捉"覆盖写"问题（此前 Fake 无条件覆盖，掩盖并发丢数据）。
+        if condition is not None:
+            try:
+                expectation = getattr(condition, "row_existence_expectation", None)
+            except Exception:  # noqa: BLE001 - Fake 容错
+                expectation = None
+            if expectation is not None and str(expectation) == "EXPECT_NOT_EXIST":
+                if key in self.tables[table]:
+                    raise OTSClientError("Condition check failed: row already exists")
         self.tables[table][key] = attrs
 
     def delete_row(self, table: str, row, condition) -> None:

@@ -269,3 +269,104 @@ def _reference_age_aware():
     boy = reference_interval("hb_g_L", 15.0, "M")
     girl = reference_interval("hb_g_L", 15.0, "F")
     assert boy != girl, (boy, girl)
+
+
+@check("B1 / 服务端生成 sample_id 为碰撞免疫 uuid（不随面板数自增）")
+def _b1_uuid_sample_id():
+    with as_caller("doctor_assistant"):
+        res = core.upsert_lab_result(
+            "P0013", {"report_date": _TODAY, "k_mmol_L": 4.8},
+        )
+    assert res["ok"] is True, res
+    sid = res["data"]["sample_id"]
+    # uuid4 hex8：格式 pid-U + 8 位十六进制；不再依赖面板计数（避免并发碰撞）
+    assert sid.startswith("P0013-U"), sid
+    tail = sid[len("P0013-U"):]
+    assert len(tail) == 8 and all(c in "0123456789abcdef" for c in tail), sid
+    # 两次不传 sample_id 必须得到不同 ID（碰撞免疫）
+    with as_caller("doctor_assistant"):
+        res2 = core.upsert_lab_result(
+            "P0013", {"report_date": _TODAY, "na_mmol_L": 140.0},
+        )
+    assert res2["ok"] is True, res2
+    assert res2["data"]["sample_id"] != sid, "两次 upsert 生成了相同 sample_id"
+
+
+@check("B1 / 显式 sample_id 重复提交被拒（不覆盖，防并发丢数据）")
+def _b1_dup_sample_id_rejected():
+    from CKDNutri_clinical_data_mcp.repository import get_repository
+
+    with as_caller("doctor_assistant"):
+        res = core.upsert_lab_result(
+            "P0013",
+            {"report_date": _TODAY, "k_mmol_L": 5.1, "sample_id": "P0013-U-test1"},
+        )
+    assert res["ok"] is True, res
+    # 同 sample_id 再次写入：条件写（EXPECT_NOT_EXIST）必须失败，不得覆盖
+    before = fake_labs_store_count()
+    try:
+        with as_caller("doctor_assistant"):
+            core.upsert_lab_result(
+                "P0013",
+                {"report_date": _TODAY, "k_mmol_L": 9.9, "sample_id": "P0013-U-test1"},
+            )
+        raise AssertionError("重复 sample_id 未被拒绝（静默覆盖=丢数据）")
+    except RuntimeError as exc:
+        assert "已存在" in str(exc), exc
+    assert fake_labs_store_count() == before, "重复提交产生了写入副作用"
+    # 原始记录未被覆盖：k 仍是 5.1（走 repository 原始面板，非 decorated results）
+    from CKDNutri_clinical_data_mcp.repository import get_repository
+
+    for p in get_repository().get_panels("P0013"):
+        if p["sample_id"] == "P0013-U-test1":
+            assert p["values"].get("k_mmol_L") == 5.1, p["values"]
+            break
+    else:
+        raise AssertionError("原记录丢失")
+
+
+@check("B1 / 同患儿 20 并发 upsert 无覆盖丢数据（线程并发压测）")
+def _b1_concurrent_upsert():
+    import threading
+
+    from CKDNutri_clinical_data_mcp.repository import get_repository
+
+    # harness 顶部已注入 A207_CALLER=doctor_assistant（进程级），并发线程共享同一身份
+    pid = "P0013"
+    n = 20
+    barrier = threading.Barrier(n)
+    results: list[dict] = []
+    lock = threading.Lock()
+    errors: list[str] = []
+
+    def _worker(idx: int):
+        try:
+            barrier.wait()  # 同时起跑，最大化碰撞窗口
+            res = core.upsert_lab_result(
+                pid,
+                {"report_date": _TODAY, "k_mmol_L": round(4.0 + idx * 0.1, 1),
+                 "hb_g_L": 100 + idx},
+            )
+            assert res["ok"] is True, res
+            with lock:
+                results.append(res)
+        except Exception as exc:  # noqa: BLE001
+            with lock:
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"并发写入出现 {len(errors)} 个错误: {errors[:3]}"
+    sids = {r["data"]["sample_id"] for r in results}
+    assert len(sids) == n, f"并发写入 sample_id 碰撞：{n} 次写入仅 {len(sids)} 个唯一 ID"
+    # 全部并发写入的 k 值都可在面板中找到（无一条被覆盖丢失）
+    panels = get_repository().get_panels(pid)
+    want_k = {round(4.0 + i * 0.1, 1) for i in range(n)}
+    got_k = {p["values"].get("k_mmol_L") for p in panels
+             if p.get("source") == "upsert" and p["values"].get("k_mmol_L") is not None}
+    missing = want_k - got_k
+    assert not missing, f"并发写入有 {len(missing)} 条被覆盖丢失: {sorted(missing)}"

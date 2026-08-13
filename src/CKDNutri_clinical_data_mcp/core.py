@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -361,8 +362,11 @@ def upsert_lab_result(
     if not values:
         return fail("INVALID_ARGUMENT", "lab 中未提供任何可识别的检验指标")
 
-    existing = len(_repo().get_panels(request.patient_id))
-    sample_id = request.lab.sample_id or f"{request.patient_id}-U{existing + 1:02d}"
+    # B1 修复（2026-08-13）：并发写入 sample_id 碰撞——「当前面板数+1」在并发下
+    # 两个请求读到相同 existing → 相同 sample_id → append_lab_record 覆盖写静默丢一条。
+    # 服务端改为生成碰撞免疫 ID（uuid4 hex8，UUID 前缀保留人读可辨性）；调用方显式
+    # 传 sample_id 仍优先（去重责任上移的显式路径，由调用方保证唯一）。
+    sample_id = request.lab.sample_id or f"{request.patient_id}-U{uuid4().hex[:8]}"
     record = {
         "patient_id": request.patient_id,
         "sample_id": sample_id,
