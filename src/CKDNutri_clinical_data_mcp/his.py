@@ -234,11 +234,6 @@ def load_dataset(force_reload: bool = False) -> dict[str, Any]:
     return _CACHE["raw"]
 
 
-def _index() -> dict[str, Any]:
-    load_dataset()
-    return _CACHE["index"]
-
-
 def _guard_guardian(caller: str, patient_id: str, guardian_token: str | None,
                     tool: str) -> dict[str, Any] | None:
     """家长助手每次读取前必须通过绑定核验，缺 token 即拒绝，不给降级视图。"""
@@ -262,12 +257,6 @@ def _token_matches(patient_id: str, guardian_token: str) -> bool:
     副本漂移——此前 P2 各维护一份副本且缺过期校验，令牌轮换后旧令牌在 P2 仍有效。
     """
     return verify_guardian_token(patient_id, guardian_token)
-
-
-def _lookup(patient_id: str) -> dict[str, Any] | None:
-    if not isinstance(patient_id, str) or not PATIENT_ID_PATTERN.match(patient_id):
-        return None
-    return _index().get(patient_id)
 
 
 def _scope_of(caller: str) -> str:

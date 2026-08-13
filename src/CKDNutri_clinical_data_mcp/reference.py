@@ -31,14 +31,6 @@ ANALYTES: dict[str, dict[str, str]] = {
     "upcr_mg_mmol": {"label": "尿蛋白肌酐比", "unit": "mg/mmol", "worse": "high"},
 }
 
-# 家长受限视图只暴露这四项（需求文档 §3 家长助手：仅最近一次 K/P/Alb/Hb）
-PARENT_VIEW_ANALYTES: tuple[str, ...] = (
-    "k_mmol_L",
-    "p_mmol_L",
-    "albumin_g_L",
-    "hb_g_L",
-)
-
 # --- 年龄分带 ---------------------------------------------------------------
 
 AGE_BANDS: tuple[tuple[float, float, str], ...] = (

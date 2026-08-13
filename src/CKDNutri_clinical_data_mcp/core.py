@@ -27,7 +27,7 @@ from .his import (
     _guard_guardian,
 )
 from .reference import ANALYTES, UNIT_ALIASES, critical_hits
-from .views import build_trend, decorate_panel, parent_trend_direction, parent_view_items
+from .views import build_trend, decorate_panel
 
 # v2.4：业务层数据访问统一走 repository（双后端），不再直连 store 文件层。
 def _repo():
@@ -49,9 +49,11 @@ NOTIFY_HINT = "a207-notify-mcp.notify_critical_value"
 def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, Any]:
     """取患者全部检验记录（按报告日期升序）。
 
-    caller=parent_assistant 返回受限视图：仅最近一次 K/P/Alb/Hb 的趋势方向与
-    是否在儿童参考区间内，危急项标注，不含任何原始数值。
-    caller=parent_assistant 必须经 guardian_token 绑定核验（F4），缺 token 即拒绝。
+    2026-08-13（用户决策）：**化验原始数值对家长可见**（家长有知情权；现实中医院
+    化验单家长本就可查阅）。caller=parent_assistant 返回完整面板（含数值/单位/参考
+    区间/状态），data_scope="parent_full"；仍必须经 guardian_token 绑定核验（F4，
+    防跨患者读取）。受限边界收敛到**临床判读**（PEW/生长曲线/医生备注在对应接口
+    仍对家长隐藏）。
     """
     caller = get_caller()
     try:
@@ -63,7 +65,7 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
     denied = _guard_access("get_labs")
     if denied:
         return denied
-    # F4：家长受限视图必须经监护人令牌绑定核验；缺 token / 不匹配即拒绝，不给降级视图
+    # F4：家长读取必须经监护人令牌绑定核验；缺 token / 不匹配即拒绝，不给降级视图
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_labs")
     if denied:
         return denied
@@ -82,18 +84,17 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
         return no_data(query.patient_id)
 
     if caller in READ_LIMITED:
-        latest = panels[-1]
-        previous = panels[-2] if len(panels) >= 2 else None
-        items = parent_view_items(latest, previous, age, sex)
+        # 2026-08-13（用户决策）：家长可见完整化验数值（data_scope 标识 parent_full），
+        # 与医生同构面板；临床判读不在此接口。
         return {
             "ok": True,
             "data": {
                 "patient_id": query.patient_id,
-                "data_scope": "limited_parent",
-                "report_date": latest["report_date"],
-                "items": items,
-                "has_critical": any(item["critical"] for item in items),
-                "note": "受限视图不含化验原始数值。需要具体数值请联系主管医生。",
+                "data_scope": "parent_full",
+                "context": patient_context(patient),
+                "panel_count": len(panels),
+                "panels": [decorate_panel(p, age, sex) for p in panels],
+                "note": "家长视图含化验原始数值（知情权）；临床判读（PEW/生长曲线等）不在此接口。",
             },
         }
 
@@ -146,7 +147,9 @@ def get_critical_values(
 
     latest = panels[-1]
     hits = critical_hits(latest["values"])
-    # BUG-05：家长仅可见"有/无"受限视图（需求 P1 家庭=✔ 有/无），不落 CRITICAL_CHANNEL
+    # 2026-08-13（用户决策）：危急值明细对家长可见（家长知情权；现实中医院会主动
+    # 告知危急值）。家长分支仍强制 guardian_token（防跨患者读取），但不落
+    # CRITICAL_CHANNEL 通知链路（通知是 doctor/risk_warning 的职责）。
     if caller not in CRITICAL_CHANNEL:
         if caller != "parent_assistant":
             return forbidden(caller, "get_critical_values")
@@ -154,10 +157,13 @@ def get_critical_values(
             "ok": True,
             "data": {
                 "patient_id": query.patient_id,
-                "data_scope": "limited_parent",
+                "data_scope": "parent_full",
                 "report_date": latest["report_date"],
-                "has_critical": bool(hits),
-                "note": "受限视图仅提示是否存在危急值（有/无），具体项目请咨询主管医生。",
+                "sample_id": latest["sample_id"],
+                "critical_count": len(hits),
+                "items": hits,
+                "next_action": NOTIFY_HINT if hits else None,
+                "note": "危急值明细对家长可见（知情权）；请及时联系主管医生处置。",
             },
         }
     history = [
@@ -250,22 +256,19 @@ def get_lab_trend(
     if not panels:
         return no_data(query.patient_id)
 
-    # BUG-06：家长仅可见趋势方向受限视图（需求 P1 家庭=✔ 仅方向），不落 READ_FULL
+    # 2026-08-13（用户决策）：家长可见完整数值趋势（知情权）——与医生同构
+    # build_trend 结果（含 point 数值/环比/斜率），data_scope="parent_full"。
     if caller not in READ_FULL:
         if caller != "parent_assistant":
             return forbidden(caller, "get_lab_trend")
-        return {
-            "ok": True,
-            "data": {
-                "patient_id": query.patient_id,
-                "data_scope": "limited_parent",
-                "analyte": query.analyte,
-                "label": ANALYTES[query.analyte]["label"],
-                "unit": ANALYTES[query.analyte]["unit"],
-                "direction": parent_trend_direction(query.analyte, panels),
-                "note": "受限视图仅提示趋势方向（↑/↓/→），不含具体数值，详情请咨询主管医生。",
-            },
-        }
+        trend = build_trend(
+            panels, query.analyte, float(patient["age_years"]), patient["sex"]
+        )
+        trend["patient_id"] = query.patient_id
+        trend["window_days"] = query.window_days
+        trend["data_scope"] = "parent_full"
+        trend["note"] = "家长视图含化验数值趋势（知情权）；临床判读（PEW/生长曲线等）不在此接口。"
+        return {"ok": True, "data": trend}
 
     trend = build_trend(
         panels, query.analyte, float(patient["age_years"]), patient["sex"]

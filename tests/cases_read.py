@@ -6,10 +6,9 @@ import re
 
 from a207_policy import as_caller
 
-from harness import check, numeric_leak
+from harness import check
 
 from CKDNutri_clinical_data_mcp import core, his, store
-from CKDNutri_clinical_data_mcp.reference import PARENT_VIEW_ANALYTES
 
 
 def _parent_token(patient_id: str) -> str:
@@ -108,31 +107,32 @@ def _labs_denied():
         assert res["ok"] is False and res["error"] == "FORBIDDEN", (caller, res)
 
 
-@check("get_labs / parent_assistant 受限视图不含任何原始数值")
+@check("get_labs / parent_assistant 可见完整化验数值（2026-08-13 用户决策：知情权）")
 def _labs_parent():
     tok = _parent_token("P0013")
     with as_caller("parent_assistant"):
         res = core.get_labs("P0013", guardian_token=tok)
     assert res["ok"] is True, res
     data = res["data"]
-    assert data["data_scope"] == "limited_parent"
-    assert "panels" not in data, "受限视图不应给出全量面板"
-    assert not numeric_leak(data), "受限视图泄露了数值"
-    assert {i["analyte"] for i in data["items"]} == set(PARENT_VIEW_ANALYTES)
-    for item in data["items"]:
-        assert "value" not in item, "受限视图条目仍带 value 字段"
-        assert item["trend"] in ("↑", "↓", "→"), item["trend"]
-        assert isinstance(item["in_reference_range"], bool)
+    assert data["data_scope"] == "parent_full"
+    assert data["panel_count"] >= 2
+    assert "panels" in data, "家长应可见完整面板（含数值）"
+    first = data["panels"][0]["results"][0]
+    for key in ("analyte", "value", "unit", "status", "ref_low", "ref_high"):
+        assert key in first, f"缺字段 {key}"
 
 
-@check("get_labs / 受限视图对危急例标红但仍不给数值")
+@check("get_labs / 危急例家长可见数值并标注危急")
 def _parent_critical():
     tok = _parent_token("P0028")
     with as_caller("parent_assistant"):
         res = core.get_labs("P0028", guardian_token=tok)
     assert res["ok"] is True
-    assert res["data"]["has_critical"] is True, res["data"]
-    assert not numeric_leak(res["data"]), "危急场景下受限视图泄露了数值"
+    assert res["data"]["data_scope"] == "parent_full"
+    crit = [r for p in res["data"]["panels"] for r in p["results"]
+            if r["status"].startswith("critical")]
+    assert crit, "危急例应有危急标注项"
+    assert all("value" in r for r in crit), "危急项应带数值"
 
 
 @check("get_labs / 未知 patient_id 返回 NOT_FOUND")
@@ -176,17 +176,16 @@ def _crit_none():
     assert res["data"]["next_action"] is None
 
 
-@check("get_critical_values 家长助手可见有/无受限视图（需求 P1 家庭=✔，BUG-05 修复）")
+@check("get_critical_values 家长助手可见命中明细（2026-08-13 用户决策：知情权）")
 def _crit_parent():
     tok = _parent_token("P0028")
     with as_caller("parent_assistant"):
         res = core.get_critical_values("P0028", guardian_token=tok)
     assert res["ok"] is True, res
     data = res["data"]
-    assert data["data_scope"] == "limited_parent"
-    assert data["has_critical"] is True
-    assert "items" not in data, "受限视图不应含危急明细"
-    assert not numeric_leak(data), "危急场景受限视图泄露了数值"
+    assert data["data_scope"] == "parent_full"
+    assert data["critical_count"] >= 1
+    assert data["items"], "家长应可见危急明细"
 
 
 @check("get_critical_values 家长助手缺 guardian_token 拒绝")
@@ -196,13 +195,14 @@ def _crit_parent_no_token():
     assert res["ok"] is False and res["error"] == "GUARDIAN_UNVERIFIED", res
 
 
-@check("get_critical_values 家长助手对平稳患者返回 has_critical=False")
+@check("get_critical_values 家长助手对平稳患者返回零命中")
 def _crit_parent_none():
     tok = _parent_token("P0001")
     with as_caller("parent_assistant"):
         res = core.get_critical_values("P0001", guardian_token=tok)
     assert res["ok"] is True
-    assert res["data"]["has_critical"] is False
+    assert res["data"]["critical_count"] == 0
+    assert res["data"]["items"] == []
 
 
 @check("get_lab_trend 返回时序、环比与斜率")
@@ -233,16 +233,17 @@ def _trend_window():
     assert 1 <= narrow <= full, (full, narrow)
 
 
-@check("get_lab_trend 家长助手可见方向受限视图（需求 P1 家庭=✔ 仅方向，BUG-06 修复）")
+@check("get_lab_trend 家长助手可见完整数值趋势（2026-08-13 用户决策：知情权）")
 def _trend_parent():
     tok = _parent_token("P0013")
     with as_caller("parent_assistant"):
         res = core.get_lab_trend("P0013", "k_mmol_L", guardian_token=tok)
     assert res["ok"] is True, res
     data = res["data"]
-    assert data["data_scope"] == "limited_parent"
+    assert data["data_scope"] == "parent_full"
+    assert data["point_count"] >= 2
+    assert all("value" in p for p in data["points"]), "家长趋势应含数值"
     assert data["direction"] in ("up", "down", "flat"), data
-    assert not numeric_leak(data), "家长趋势视图泄露了数值"
 
 
 @check("get_lab_trend 家长助手缺 guardian_token 拒绝")

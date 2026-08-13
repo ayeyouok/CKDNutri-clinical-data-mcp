@@ -1,6 +1,8 @@
-"""检验结果的呈现层：区间标注、家长受限视图、趋势数学。
+"""检验结果的呈现层：区间标注、趋势数学。
 
 本模块不做权限判定，只负责把原始数值转成可展示结构。
+（2026-08-13：家长受限视图专用函数 parent_view_items / parent_trend_direction 已删除——
+用户决策：化验原始数值对家长可见（知情权），权限边界收敛到 core 的 data_scope 标识。）
 """
 
 from __future__ import annotations
@@ -10,7 +12,6 @@ from typing import Any
 
 from .reference import (
     ANALYTES,
-    PARENT_VIEW_ANALYTES,
     STATUS_LABEL,
     classify,
     reference_interval,
@@ -68,51 +69,6 @@ def trend_code(current: float, previous: float | None, analyte: str) -> str:
     if change < -FLAT_TOLERANCE:
         return "down"
     return "flat"
-
-
-def parent_view_items(
-    latest: dict[str, Any],
-    previous: dict[str, Any] | None,
-    age: float,
-    sex: str,
-) -> list[dict[str, Any]]:
-    """家长受限视图：只给 K/P/Alb/Hb 的方向与区间内外，不返回任何原始数值。"""
-    latest_values = latest.get("values", {})
-    prev_values = (previous or {}).get("values", {})
-    items: list[dict[str, Any]] = []
-    for analyte in PARENT_VIEW_ANALYTES:
-        value = latest_values.get(analyte)
-        if value is None:
-            continue
-        status = classify(analyte, float(value), age, sex)
-        prev = prev_values.get(analyte)
-        code = trend_code(float(value), float(prev) if prev is not None else None, analyte)
-        items.append(
-            {
-                "analyte": analyte,
-                "label": ANALYTES[analyte]["label"],
-                "status": status,
-                "status_label": STATUS_LABEL[status],
-                "trend": TREND_ARROW[code],
-                "trend_code": code,
-                "in_reference_range": status == "in_range",
-                "critical": status.startswith("critical"),
-            }
-        )
-    return items
-
-
-def parent_trend_direction(analyte: str, panels: list[dict[str, Any]]) -> str:
-    """家长受限趋势视图：仅返回最近两次采样的方向码（up/down/flat），不含任何数值。
-
-    BUG-06 修复配套（需求 P1：get_lab_trend 家庭=✔ 仅方向）。
-    """
-    points = [p for p in panels if p.get("values", {}).get(analyte) is not None]
-    if not points:
-        return "flat"
-    latest = float(points[-1]["values"][analyte])
-    previous = float(points[-2]["values"][analyte]) if len(points) >= 2 else None
-    return trend_code(latest, previous, analyte)
 
 
 def _days_between(start: str, end: str) -> int:

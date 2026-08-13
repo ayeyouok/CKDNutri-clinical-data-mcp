@@ -25,11 +25,14 @@ Tablestore 表结构（v2.4 设计，详见 A207_工具粒度架构评审_202608
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Protocol, runtime_checkable
 
 from . import his as _his
 from . import store as _store
+
+logger = logging.getLogger("CKDNutri-clinical-data-mcp.repository")
 
 # Tablestore 连接参数的环境变量名（与 a207-policy 的 env 注入约定一致）
 OTS_ENDPOINT_ENV = "A207_OTS_ENDPOINT"
@@ -209,8 +212,15 @@ class TablestoreRepository:
     def _get_row(self, table: str, pk: list[tuple[str, str]]) -> dict[str, Any] | None:
         try:
             _, row, _ = self._get_client().get_row(table, pk)
-        except Exception:
-            return None
+        except Exception as exc:
+            # 五审（2026-08-13）🔴：存储层故障必须 fail-closed 抛错（→ INTERNAL_ERROR），
+            # **不得静默返回 None**——此前宽 except 把网络抖动/超时/鉴权失败全部吞掉，
+            # 上层 get_patient 等会误判"患者不存在"（NOT_FOUND），医疗数据可信度受损
+            # （医生在 Tablestore 抖动时看到"查无此人"而非"系统故障"）。
+            # 行不存在（row is None）是 SDK 的正常返回，不抛异常。
+            logger.error("Tablestore get_row 失败: table=%s pk=%s exc=%s", table, pk, exc)
+            raise RuntimeError(
+                f"Tablestore 读取失败（table={table}），详情见服务端日志") from exc
         if row is None:
             return None
         # attribute_columns 为 (name, value, timestamp) 三元组，仅取 name/value

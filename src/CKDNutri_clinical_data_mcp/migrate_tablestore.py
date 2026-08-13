@@ -99,6 +99,11 @@ def migrate() -> dict[str, int]:
     print(f"[migrate] labs_store 表写入 {store_rows} 条")
 
     # 4) guardian_tokens 状态库
+    # 五审（2026-08-13）说明：令牌校验（a207_policy.verify_guardian_token）与签发
+    # （his.issue_guardian_token）当前仍以 **JSON 文件（guardian_tokens.json）为事实源**
+    # ——a207-policy 是跨包共享层，令牌读写未接 Tablestore 后端。此处迁移到 Tablestore
+    # 仅为"未来 a207-policy 支持 Tablestore 后端时开箱即用"预留，当前无读路径；
+    # 多实例部署的令牌一致性靠 A207_GUARDIAN_TOKEN_DIR 指向共享持久目录保证。
     tokens = _load_guardian_tokens()
     repo.save_guardian_tokens(tokens)
     counts[TABLE_GUARDIAN_TOKENS] = len(tokens)

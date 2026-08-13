@@ -119,9 +119,8 @@ def verify_guardian_binding_tool(patient_id: str, guardian_token: str) -> dict[s
 def issue_guardian_token_tool(patient_id: str) -> dict[str, Any]:
     """签发监护人令牌（仅 CKD 临床助手）。生成随机令牌供家长端绑定核验，返回一次性令牌。
 
-    BUG-17 说明（2026-08-12）：本工具不在需求 P1 工具表 10 项内，但为家长受限视图
-    绑定核验（F1/F4）所必需——家长访问 HIS/M2 数据均须凭此令牌。token 有效期 30 天，
-    过期由医生重新签发。
+    家长访问患儿数据（档案/化验/危急值/趋势）均须凭此令牌完成绑定核验；token 有效期
+    30 天，过期后需医生重新签发。令牌须经安全渠道交付家长，勿写入日志。
     """
     try:
         return issue_guardian_token(patient_id)
@@ -151,7 +150,7 @@ def get_nutrition_ceiling_tool(patient_id: str, guardian_token: str = "") -> dic
 
 @mcp.tool
 def get_labs_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
-    """查最新化验面板（按身份视图裁剪：临床=全量，家庭=趋势方向）。家庭助手需携带 guardian_token。"""
+    """查最新化验面板（2026-08-13 起家长可见完整化验数值，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_labs(patient_id, guardian_token)
     except Exception as exc:
@@ -160,7 +159,7 @@ def get_labs_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
 
 @mcp.tool
 def get_critical_values_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
-    """查是否有当前危急值。临床/风险=全量明细；家庭助手=有/无受限视图（需 guardian_token）。"""
+    """查当前危急值明细（2026-08-13 起家长可见命中明细，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_critical_values(patient_id, guardian_token)
     except Exception as exc:
@@ -170,7 +169,7 @@ def get_critical_values_tool(patient_id: str, guardian_token: str = "") -> dict[
 @mcp.tool
 def get_lab_trend_tool(patient_id: str, analyte: str, window_days: int = None,
                        guardian_token: str = "") -> dict[str, Any]:
-    """查指定指标最近 N 次趋势。临床/风险=全量；家庭助手=仅方向受限视图（需 guardian_token）。"""
+    """查指定指标最近 N 次趋势（2026-08-13 起家长可见完整数值趋势，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_lab_trend(patient_id, analyte, window_days, guardian_token)
     except Exception as exc:
