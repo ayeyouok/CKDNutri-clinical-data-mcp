@@ -52,6 +52,12 @@ PATIENT_ID_PATTERN = re.compile(r"^P[0-9]{4,}$")
 COHORT_CALLERS: frozenset[str] = HIS_COHORT
 ALLOWED_FILTER_KEYS: frozenset[str] = HIS_ALLOWED_FILTER_KEYS
 
+# list_patients 分页（2026-08-13 医生端量级防护）：默认 50 条/页，上限 200 钳制——
+# HIS 患者成百上千时全量返回会灌爆 LLM 上下文并拖慢响应；LLM 应先按 ID 单查，
+# 浏览/筛查走分页。超上限钳制而非报错（宁可多页也不让调用方因 page_size 过大崩）。
+_LIST_DEFAULT_PAGE_SIZE = 50
+_LIST_MAX_PAGE_SIZE = 200
+
 _MCP_NAME = "CKDNutri-clinical-data-mcp"
 
 
@@ -458,8 +464,13 @@ def _match(p: dict[str, Any], key: str, want: Any) -> bool:
     return False
 
 
-def list_patients(filter: dict[str, Any] | None = None) -> dict[str, Any]:
-    """按 age_band / ckd_stage / dialysis 等条件筛选队列。未知筛选键直接报错，不静默忽略。"""
+def list_patients(filter: dict[str, Any] | None = None,
+                  page: int = 1, page_size: int = _LIST_DEFAULT_PAGE_SIZE) -> dict[str, Any]:
+    """按 age_band / ckd_stage / dialysis 等条件筛选队列（分页，按 patient_id 升序）。
+
+    未知筛选键直接报错，不静默忽略。分页参数：page 从 1 起；page_size 默认 50、
+    上限 200（超限钳制）。count 为本页条数，total_matched 为匹配总数。
+    """
     caller = get_caller()
     denied = _guard_access("list_patients")
     if denied:
@@ -467,6 +478,11 @@ def list_patients(filter: dict[str, Any] | None = None) -> dict[str, Any]:
     # 跨患者队列检索在中枢读权之上再叠加 M1 cohort 限制（家长仅能访问被绑定单个患儿）
     if caller not in COHORT_CALLERS:
         return _err("FORBIDDEN", f"caller={caller} not allowed for list_patients（队列检索仅限临床/风险身份）")
+    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+        return _err("INVALID_FILTER", "page 必须为 ≥1 的整数")
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+        return _err("INVALID_FILTER", "page_size 必须为 ≥1 的整数")
+    page_size = min(page_size, _LIST_MAX_PAGE_SIZE)
     criteria = filter or {}
     if not isinstance(criteria, dict):
         return _err("INVALID_FILTER", "filter 必须是对象")
@@ -482,15 +498,24 @@ def list_patients(filter: dict[str, Any] | None = None) -> dict[str, Any]:
     # v2.4：数据读取走 repository（双后端），筛选谓词在 repo 内部复用本模块 _match
     repo = _repo()
     rows = repo.list_patients(criteria)
+    # 分页前显式排序（Tablestore GetRange 天然按主键序，LocalJson 需排序保证跨页稳定）
+    rows = sorted(rows, key=lambda r: r["patient_id"])
+    total = len(rows)
+    start = (page - 1) * page_size
+    page_rows = rows[start:start + page_size]
     meta = repo.get_dataset_meta()
     return {
         "ok": True,
         "data": {
-            "count": len(rows),
+            "count": len(page_rows),
+            "total_matched": total,
             "total_in_dataset": meta["patient_count"],
+            "page": page,
+            "page_size": page_size,
+            "has_more": start + page_size < total,
             "applied_filter": dict(criteria),
-            "patient_ids": [r["patient_id"] for r in rows],
-            "patients": rows,
+            "patient_ids": [r["patient_id"] for r in page_rows],
+            "patients": page_rows,
         },
     }
 

@@ -126,10 +126,21 @@ def issue_guardian_token_tool(patient_id: str) -> dict[str, Any]:
 
 
 @mcp.tool
-def list_patients_tool(filter: dict = None) -> dict[str, Any]:
-    """按维度筛查患者队列。仅 CKD 临床助手。"""
+def list_patients_tool(filter: dict = None, page: int = 1, page_size: int = 50) -> dict[str, Any]:
+    """按维度筛查/浏览患者队列（分页，按 patient_id 升序）。仅 CKD 临床助手。
+
+    用法指引（重要）：
+    - **查询单个患者请直接用 get_patient_profile_tool(patient_id)**，不要用本工具
+      全量拉取后再找——患者多时本工具分页返回，全量拉取会浪费大量时间与上下文。
+    - 本工具用于**按条件筛查队列**：filter 支持 age_band / ckd_stage / dialysis /
+      sex / primary_disease / min_age_years / max_age_years 等键（见 INVALID_FILTER
+      报错提示）；不传 filter 时返回全部患者的第一页。
+    - 分页：page 从 1 起；page_size 默认 50、最大 200（超限自动钳制）。
+      返回 has_more=true 表示还有下一页；total_matched 为匹配总数。
+    - 场景示例：查全部 G3 期患儿 → filter={"ckd_stage": "G3"}。
+    """
     try:
-        return list_patients(filter)
+        return list_patients(filter, page=page, page_size=page_size)
     except Exception as exc:
         return _invalid(exc)
 

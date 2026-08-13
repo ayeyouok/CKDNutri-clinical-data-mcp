@@ -257,3 +257,52 @@ def _trend_parent_no_token():
 def _trend_bad():
     res = core.get_lab_trend("P0013", "potassium")
     assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
+
+
+@check("list_patients 分页语义（医生端量级防护，2026-08-13）")
+def _list_patients_pagination():
+    import math
+
+    with as_caller("doctor_assistant"):
+        r = his.list_patients()
+    d = r["data"]
+    # 默认页：50 条/页；36 患儿 < 50 → 一页取完 has_more=False
+    assert d["count"] == d["total_matched"] == 36, (d["count"], d["total_matched"])
+    assert d["page"] == 1 and d["page_size"] == 50 and d["has_more"] is False
+    assert d["patient_ids"] == sorted(d["patient_ids"]), "应按 patient_id 升序（跨页稳定）"
+    sample = d["patients"][0]
+    assert {"patient_id", "age_years", "age_band", "sex", "ckd_stage",
+            "dialysis", "primary_disease", "has_allergies"} <= set(sample), sample.keys()
+
+    # 小页多页：page_size=10 → 4 页（36=10+10+10+6），页间无重叠
+    r1 = his.list_patients(page_size=10)
+    r2 = his.list_patients(page=4, page_size=10)
+    d1, d2 = r1["data"], r2["data"]
+    assert d1["count"] == 10 and d1["has_more"] is True
+    assert d2["count"] == 6 and d2["has_more"] is False
+    assert not set(d1["patient_ids"]) & set(d2["patient_ids"])
+
+    # 越界页 → 空页（不报错）
+    r3 = his.list_patients(page=99, page_size=10)
+    assert r3["data"]["count"] == 0 and r3["data"]["has_more"] is False
+
+    # 非法分页参数 → INVALID_FILTER
+    for bad_page, bad_size in ((0, 10), (1.5, 10), ("1", 10), (1, 0), (1, True)):
+        rr = his.list_patients(page=bad_page, page_size=bad_size)
+        assert rr.get("error") == "INVALID_FILTER", (bad_page, bad_size, rr)
+
+    # page_size 超上限钳制 200
+    assert his.list_patients(page_size=9999)["data"]["page_size"] == 200
+
+    # filter + 分页组合：G3a（6 例）→ 首尾页
+    d5 = his.list_patients(filter={"ckd_stage": "G3a"}, page_size=5)["data"]
+    assert d5["total_matched"] == 6 and d5["count"] == 5 and d5["has_more"] is True
+    assert all(p["ckd_stage"] == "G3a" for p in d5["patients"])
+    last = math.ceil(6 / 5)
+    dl = his.list_patients(filter={"ckd_stage": "G3a"}, page=last, page_size=5)["data"]
+    assert dl["has_more"] is False and dl["count"] == 1
+
+    # 家长（非 cohort 角色）→ FORBIDDEN（越权回归）
+    with as_caller("parent_assistant"):
+        denied = his.list_patients()
+    assert denied["ok"] is False and denied["error"] == "FORBIDDEN", denied

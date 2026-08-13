@@ -74,8 +74,12 @@ class FakeOtsClient:
 
     def _seed(self) -> None:
         from CKDNutri_clinical_data_mcp import _labs_baseline
+        from CKDNutri_clinical_data_mcp import his as _his
 
-        for p in store.load_dataset().get("patients", []):
+        # patients 表种子 = HIS 患者档案（patients.json 全量，与 migrate_tablestore 同源）——
+        # 此前误用 store.load_dataset()（LIS 化验基线，仅 7 键 primary_dx/panels），
+        # 导致 Fake 下 list_patients/get_patient_profile 缺 age_band/primary_disease 等档案键。
+        for p in _his.load_dataset().get("patients", []):
             attrs = _repo_mod.TablestoreRepository._serialize_patient(p)
             self.put_row(_repo_mod.TABLE_PATIENTS,
                          _FakeRow([("patient_id", p["patient_id"])], attrs), None)
