@@ -1,9 +1,11 @@
-"""自测脚手架：环境隔离、身份注入、断言收集、数值泄露探测。
+"""自测脚手架：环境隔离、身份注入、Fake Tablestore、断言收集、数值泄露探测。
 
 导入本模块即完成三件事：
 1. 注入测试身份 A207_CALLER（方案 A / P0-1：caller 由部署环境注入，模型不可自证）；
-2. 校验默认数据目录能解析到基线 labs.json；
-3. 把数据目录切到临时副本，使写操作不污染仓库产物。
+2. 校验默认数据目录能解析到基线 labs 数据（内联基线，自包含）；
+3. **注入内存 Fake Tablestore 客户端**（v3.0：唯一后端 = Tablestore，测试不连真实 OTS，
+   用内存实现 get_row/put_row/get_range 等最小接口，种子数据=patients.json 全量 + labs 基线，
+   等价于"迁移完成后的 Tablestore"），并把令牌库切到临时目录（guardian_tokens 走 JSON 事实源）。
 必须在 import core 之前先 import 本模块。
 
 用例若需其他身份，显式传 caller 形参覆盖（等价于换一个部署实例）。
@@ -11,12 +13,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
 import tempfile
 import traceback
 from pathlib import Path
+from unittest import mock
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -28,16 +32,113 @@ if str(SRC) not in sys.path:
 # P0-1：模拟部署侧注入身份。缺失即 fail-closed，故测试必须显式注入。
 os.environ.setdefault("A207_CALLER", "doctor_assistant")
 
+from CKDNutri_clinical_data_mcp import repository as _repo_mod  # noqa: E402
 from CKDNutri_clinical_data_mcp import store  # noqa: E402
 
-# 基线数据随包内联（_labs_baseline.BASELINE），任意部署环境自包含加载，无需 labs.json 文件；
-# 写操作隔离到临时目录（A207_LIS_DATA_DIR），不污染仓库产物。
+# 基线数据随包内联（_labs_baseline.BASELINE），任意部署环境自包含加载；
+# 令牌库（guardian_tokens.json）隔离到临时目录，不污染仓库产物。
 ds = store.load_dataset()
 assert ds.get("patients"), "内联基线数据缺失：load_dataset 返回空"
 TMP_DIR = Path(tempfile.mkdtemp(prefix="a207-clinical-test-"))
-os.environ["A207_LIS_DATA_DIR"] = str(TMP_DIR)
 os.environ["A207_GUARDIAN_TOKEN_DIR"] = str(TMP_DIR)
-store.load_dataset(refresh=True)
+
+
+# ---- 内存 Fake Tablestore 客户端（v3.0 单后端测试注入）----------------------
+class _FakeRow:
+    """模拟 tablestore.Row：primary_key 为 [(名,值)]，attribute_columns 为 [(名,值,ts)]。"""
+
+    def __init__(self, primary_key: list[tuple[str, str]], attrs: dict):
+        self.primary_key = [(n, v) for n, v in primary_key]
+        self.attribute_columns = [(n, v, 0) for n, v in attrs.items()]
+
+
+class FakeOtsClient:
+    """内存版 OTS 客户端（get_row/put_row/get_range/list_table 最小接口）。
+
+    种子数据 = patients.json 全量（patients 表）+ _labs_baseline 基线（labs 表），
+    等价于"迁移完成后的 Tablestore"；labs_store 从空开始（upsert 写入验证用）。
+    """
+
+    def __init__(self) -> None:
+        self.tables: dict[str, dict[tuple, dict]] = {
+            name: {} for name in (_repo_mod.TABLE_PATIENTS,
+                                  _repo_mod.TABLE_LABS,
+                                  _repo_mod.TABLE_LABS_STORE)
+        }
+        self._seed()
+
+    @staticmethod
+    def _pk_names(table: str) -> list[str]:
+        return (["patient_id"] if table == _repo_mod.TABLE_PATIENTS
+                else ["patient_id", "sample_id"])
+
+    def _seed(self) -> None:
+        from CKDNutri_clinical_data_mcp import _labs_baseline
+
+        for p in store.load_dataset().get("patients", []):
+            attrs = _repo_mod.TablestoreRepository._serialize_patient(p)
+            self.put_row(_repo_mod.TABLE_PATIENTS,
+                         _FakeRow([("patient_id", p["patient_id"])], attrs), None)
+        for patient in _labs_baseline.BASELINE.get("patients", []):
+            pid = patient["patient_id"]
+            for panel in patient.get("panels", []):
+                attrs = {
+                    "report_date": panel.get("report_date"),
+                    "specimen": panel.get("specimen"),
+                    "values": json.dumps(panel.get("values", {}), ensure_ascii=False),
+                    "source": "baseline",
+                    "recorded_by": None,
+                }
+                self.put_row(_repo_mod.TABLE_LABS,
+                             _FakeRow([("patient_id", pid),
+                                       ("sample_id", panel["sample_id"])], attrs), None)
+
+    def list_table(self) -> list[str]:
+        return list(self.tables)
+
+    def get_row(self, table: str, pk: list[tuple[str, str]]):
+        key = tuple(v for _, v in pk)
+        attrs = self.tables[table].get(key)
+        return None, (_FakeRow(pk, attrs) if attrs is not None else None), None
+
+    def put_row(self, table: str, row, condition) -> None:
+        key = tuple(v for _, v in row.primary_key)
+        cols = row.attribute_columns
+        # SDK 的 Row（_put_row 构造）attribute_columns 为 (name, value) 二元组；
+        # get_row 返回的 row 为 (name, value, ts) 三元组。兼容两种。
+        if cols and len(cols[0]) == 2:
+            attrs = dict(cols)
+        else:
+            attrs = {n: v for n, v, _ in cols}
+        self.tables[table][key] = attrs
+
+    def delete_row(self, table: str, row, condition) -> None:
+        key = tuple(v for _, v in row.primary_key)
+        self.tables[table].pop(key, None)
+
+    def get_range(self, table: str, direction: str, start, end, limit: int = 200):
+        names = self._pk_names(table)
+        rows = [_FakeRow(list(zip(names, key)), attrs)
+                for key, attrs in sorted(self.tables[table].items())]
+        return None, None, rows, None
+
+
+# 唯一后端注入：patch repository.get_repository → 带 Fake 客户端的 TablestoreRepository。
+# core/his 的 _repo() 每次调用 `from .repository import get_repository`，patch 模块属性即生效。
+FAKE_REPO = _repo_mod.TablestoreRepository(client=FakeOtsClient())
+_REPO_PATCH = mock.patch.object(_repo_mod, "get_repository", return_value=FAKE_REPO)
+_REPO_PATCH.start()
+
+
+def fake_labs_store_count() -> int:
+    """测试断言用：当前 labs_store（写库）行数。"""
+    return len(FAKE_REPO._client.tables[_repo_mod.TABLE_LABS_STORE])
+
+
+def fake_labs_store_records() -> list[dict]:
+    """测试断言用：labs_store（写库）全部属性行。"""
+    return [dict(attrs) for attrs in FAKE_REPO._client.tables[_repo_mod.TABLE_LABS_STORE].values()]
+
 
 RESULTS: list[tuple[str, bool, str]] = []
 

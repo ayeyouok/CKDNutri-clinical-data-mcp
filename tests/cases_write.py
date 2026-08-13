@@ -10,9 +10,9 @@ import sys
 from datetime import date
 
 from a207_policy import CallerUnknown, as_caller
-from harness import PKG_ROOT, SRC, check
+from harness import PKG_ROOT, SRC, check, fake_labs_store_count, fake_labs_store_records
 
-from CKDNutri_clinical_data_mcp import core, store
+from CKDNutri_clinical_data_mcp import core
 from CKDNutri_clinical_data_mcp.reference import ANALYTES, reference_interval
 
 DENIED_WRITERS = ("parent_assistant", "nutritionist", "child_companion",
@@ -35,10 +35,11 @@ def _upsert_ok():
     assert data["persisted"] is True
     assert data["store_record_count"] >= 1
     assert data["next_action"] == "a207-risk-rules-mcp.evaluate_risk_rules"
-    assert store.store_path().exists(), "写库文件未落盘"
-    payload = json.loads(store.store_path().read_text(encoding="utf-8"))
-    assert payload["records"][-1]["patient_id"] == "P0013"
-    assert payload["records"][-1]["recorded_by"] == "doctor_assistant"
+    # v3.0：写库落在 Tablestore labs_store（Fake 客户端），不再有 JSON 文件
+    records = fake_labs_store_records()
+    assert records, "Tablestore labs_store 无写入"
+    assert records[-1].get("source") == "upsert"
+    assert records[-1].get("recorded_by") == "doctor_assistant"
 
 
 @check("upsert 后 get_labs 能读到新采样且排在末位")
@@ -61,7 +62,7 @@ def _upsert_trend():
 
 @check("upsert / write_mode=False 只校验不落盘")
 def _upsert_dryrun():
-    before = len(store.load_store())
+    before = fake_labs_store_count()
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
             "P0014", {"report_date": _TODAY, "k_mmol_L": 4.8},
@@ -69,7 +70,7 @@ def _upsert_dryrun():
         )
     assert res["ok"] is True and res["recommend_reevaluate"] is True, res
     assert res["data"]["persisted"] is False, res["data"]
-    assert len(store.load_store()) == before, "回滚模式仍然写库了"
+    assert fake_labs_store_count() == before, "回滚模式仍然写库了"
 
 
 @check("upsert / 入口单位归一化 mg/dL -> 契约单位")
@@ -131,13 +132,13 @@ def _upsert_others():
 
 @check("upsert / 越权时不产生任何写入副作用")
 def _upsert_no_side_effect():
-    before = len(store.load_store())
+    before = fake_labs_store_count()
     for caller in DENIED_WRITERS:
         with as_caller(caller):
             core.upsert_lab_result(
                 "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5}
             )
-    assert len(store.load_store()) == before, "越权调用仍然改动了写库"
+    assert fake_labs_store_count() == before, "越权调用仍然改动了写库"
 
 
 @check("upsert / 未知字段被白名单拦截")
@@ -158,6 +159,19 @@ def _upsert_range():
             write_mode=False,
         )
     assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
+
+
+@check("upsert / NaN/Inf 化验值被拒且无写入副作用（S4：NaN 穿透范围校验的回归防线）")
+def _upsert_nan():
+    before = fake_labs_store_count()
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with as_caller("doctor_assistant"):
+            res = core.upsert_lab_result(
+                "P0013", {"report_date": _TODAY, "k_mmol_L": bad},
+                write_mode=False,
+            )
+        assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", (bad, res)
+    assert fake_labs_store_count() == before, "NaN/Inf 写入产生了副作用"
 
 
 @check("upsert / 空指标载荷被拒")

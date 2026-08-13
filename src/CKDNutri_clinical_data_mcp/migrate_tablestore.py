@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""JSON → Tablestore 数据迁移脚本（幂等，可重跑）。
+"""JSON → Tablestore 一次性历史数据迁移脚本（幂等，可重跑）。
+
+v3.0（2026-08-13）：运行时 JSON 存储已删除（唯一后端 Tablestore），本脚本仅用于
+把**历史** JSON 数据一次性搬到 Tablestore，完成后本地 JSON 即可弃用。
 
 用法（先注入 A207_OTS_* 连接参数）：
     python -m CKDNutri_clinical_data_mcp.migrate_tablestore
@@ -7,8 +10,8 @@
 迁移内容：
 - patients.json（HIS 患者主索引 36 条）→ patients 表
 - _labs_baseline.py 内联基线（LIS 化验面板）→ labs 表
-- 写库 labs_store.json（若存在，upsert 记录）→ labs_store 表
-- guardian_tokens 状态库（若存在）→ guardian_tokens 表
+- labs_store.json（旧运行时写库，若存在，upsert 记录）→ labs_store 表
+- guardian_tokens **不再迁移**（令牌库 JSON 文件是 a207-policy 校验的事实源，与 Tablestore 无关）
 
 幂等性：按主键 PutRow（覆盖语义），重复执行不产生重复行。
 嵌套结构（biochemistry/food_diary_5d/nutrition_ceiling/allergies/...）序列化为
@@ -22,9 +25,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import store as _store
+from a207_policy import resolve_state_path
+
 from .repository import (
-    TABLE_GUARDIAN_TOKENS,
     TABLE_LABS,
     TABLE_LABS_STORE,
     TABLE_PATIENTS,
@@ -33,6 +36,9 @@ from .repository import (
 )
 
 SRC = Path(__file__).resolve().parent
+
+# 旧 JSON 写库文件名（v3.0 前 store.py 使用；仅迁移脚本读取）
+LEGACY_LABS_STORE_FILENAME = "labs_store.json"
 
 
 def _load_patients() -> list[dict[str, Any]]:
@@ -48,14 +54,22 @@ def _load_labs_baseline() -> list[dict[str, Any]]:
     return list(_labs_baseline.BASELINE.get("patients", []))
 
 
+def _legacy_labs_store_path() -> Path:
+    """定位 v3.0 前的 labs_store.json（A207_LIS_DATA_DIR override 优先）。"""
+    override = os.environ.get("A207_LIS_DATA_DIR")
+    if override:
+        return Path(override) / LEGACY_LABS_STORE_FILENAME
+    return resolve_state_path(LEGACY_LABS_STORE_FILENAME)
+
+
 def _load_labs_store() -> list[dict[str, Any]]:
-    return _store.load_store()
-
-
-def _load_guardian_tokens() -> dict[str, Any]:
-    from .his import _load_guardian_tokens
-
-    return _load_guardian_tokens()
+    """读取旧 JSON 写库（v3.0 前 store.load_store 语义）；文件缺失返回空列表。"""
+    path = _legacy_labs_store_path()
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    records = payload.get("records", []) if isinstance(payload, dict) else []
+    return records if isinstance(records, list) else []
 
 
 def migrate() -> dict[str, int]:
@@ -90,24 +104,17 @@ def migrate() -> dict[str, int]:
     counts[TABLE_LABS] = lab_rows
     print(f"[migrate] labs 表写入 {lab_rows} 条")
 
-    # 3) labs_store 写库（upsert 记录，若存在）
+    # 3) labs_store 旧写库（v3.0 前的 upsert 记录，一次性历史迁移）
     store_rows = 0
     for record in _load_labs_store():
         repo.append_lab_record(record)
         store_rows += 1
     counts[TABLE_LABS_STORE] = store_rows
-    print(f"[migrate] labs_store 表写入 {store_rows} 条")
+    print(f"[migrate] labs_store 表写入 {store_rows} 条（历史 JSON 写库）")
 
-    # 4) guardian_tokens 状态库
-    # 五审（2026-08-13）说明：令牌校验（a207_policy.verify_guardian_token）与签发
-    # （his.issue_guardian_token）当前仍以 **JSON 文件（guardian_tokens.json）为事实源**
-    # ——a207-policy 是跨包共享层，令牌读写未接 Tablestore 后端。此处迁移到 Tablestore
-    # 仅为"未来 a207-policy 支持 Tablestore 后端时开箱即用"预留，当前无读路径；
-    # 多实例部署的令牌一致性靠 A207_GUARDIAN_TOKEN_DIR 指向共享持久目录保证。
-    tokens = _load_guardian_tokens()
-    repo.save_guardian_tokens(tokens)
-    counts[TABLE_GUARDIAN_TOKENS] = len(tokens)
-    print(f"[migrate] guardian_tokens 表写入 {len(tokens)} 条")
+    # 4) guardian_tokens 不再迁移：令牌库 JSON 文件是 a207-policy 校验的事实源
+    #    （his.issue_guardian_token 直接读写 JSON，与 Tablestore 无关）。
+    print("[migrate] guardian_tokens 跳过迁移（JSON 文件为校验事实源）")
 
     return counts
 

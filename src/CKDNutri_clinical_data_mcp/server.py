@@ -67,22 +67,19 @@ def _invalid(exc):
 
 
 def main():
-    # v2.4 启动自检：tablestore 后端时验证 OTS 连通性（仅日志，不阻断启动）。
+    # v3.0 启动自检（唯一后端 = Tablestore）：验证 OTS 连通性（仅日志，不阻断启动）。
     # 用于魔搭/HAIP 部署后确认沙箱能否访问表格存储——看运行日志即可判断：
     #   [ots-selfcheck] OK ...        → 网络通，数据读写走 OTS
     #   [ots-selfcheck] FAIL ...      → 沙箱禁外网 / 凭据错误，按 error 排查
-    import os as _os
+    try:
+        from .repository import TablestoreRepository
 
-    if _os.environ.get("A207_STORAGE_BACKEND", "").strip().lower() == "tablestore":
-        try:
-            from .repository import TablestoreRepository
-
-            repo = TablestoreRepository()
-            tables = repo._get_client().list_table()
-            logger.info("[ots-selfcheck] OK 已连通表格存储，表=%s", sorted(tables))
-        except Exception as exc:  # noqa: BLE001 - 自检失败不阻断启动，打日志供排障
-            logger.error("[ots-selfcheck] FAIL 无法连接表格存储：%s: %s",
-                         type(exc).__name__, str(exc)[:200])
+        repo = TablestoreRepository()
+        tables = repo._get_client().list_table()
+        logger.info("[ots-selfcheck] OK 已连通表格存储，表=%s", sorted(tables))
+    except Exception as exc:  # noqa: BLE001 - 自检失败不阻断启动，打日志供排障
+        logger.error("[ots-selfcheck] FAIL 无法连接表格存储：%s: %s",
+                     type(exc).__name__, str(exc)[:200])
     mcp.run()
 
 

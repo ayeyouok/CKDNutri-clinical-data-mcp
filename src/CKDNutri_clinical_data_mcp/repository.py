@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
-"""P1 临床数据域 DAO 抽象层（v2.4：JSON ↔ Tablestore 双后端）。
+"""P1 临床数据域 DAO 层（v3.0：唯一后端 = 阿里云表格存储 Tablestore）。
 
 设计目标：
 - 数据访问契约与存储实现解耦：业务层（his.py / core.py）只面向本层接口编程，
-  存储后端可切换（本地 JSON 文件 ↔ 阿里云表格存储 Tablestore），业务逻辑零改动。
+  存储后端固定为 Tablestore，业务逻辑零感知。
 - 本层只做「数据存取」，不做权限/脱敏/业务计算——那些留在 his.py / core.py。
 
-后端切换（环境变量）：
-- A207_STORAGE_BACKEND=json（默认）：本地 JSON 文件（现状，零回归）
-- A207_STORAGE_BACKEND=tablestore：阿里云表格存储（需配 A207_OTS_* 连接参数）
+v3.0（2026-08-13）：**删除 JSON 双后端**（用户决策：不要双后端）——此前
+A207_STORAGE_BACKEND=json 的 LocalJsonRepository 及其 labs_store.json 写库一并移除，
+Tablestore 为唯一数据后端；guardian_tokens 从本层移除（令牌校验在跨包共享层
+a207-policy，以 JSON 文件为事实源，his.py 直接读写，不经过本层）。
 
 Tablestore 连接参数（由部署环境注入，与 A207_CALLER 同模式，不入代码）：
 - A207_OTS_ENDPOINT       形如 https://xxx.cn-hangzhou.ots.aliyuncs.com
@@ -16,36 +17,45 @@ Tablestore 连接参数（由部署环境注入，与 A207_CALLER 同模式，�
 - A207_OTS_ACCESS_KEY_ID   RAM 子账号 AK
 - A207_OTS_ACCESS_KEY_SECRET  AK Secret
 
-Tablestore 表结构（v2.4 设计，详见 A207_工具粒度架构评审_20260812.md §5）：
+Tablestore 表结构：
 - patients       主键 patient_id；属性列 = 档案字段（嵌套结构 JSON 序列化进 bio/food_diary/ceiling 列）
 - labs           主键 patient_id + sample_id；属性列 = report_date/specimen/values(JSON)/source/recorded_by
 - labs_store     写库追加（与 labs 同构，source=upsert）；get_panels 时按 sample_id 合并覆盖基线
-- guardian_tokens 主键 patient_id；属性列 = token/issued_at/expires_at/issued_by
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import threading
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from a207_policy import atomic_write_json, resolve_state_path
+
 from . import his as _his
-from . import store as _store
 
 logger = logging.getLogger("CKDNutri-clinical-data-mcp.repository")
+
+# LocalJson 后端写库 RMW 并发保护（单进程内串行化；Tablestore 端行级原子无需）
+_FILE_LOCK = threading.Lock()
 
 # Tablestore 连接参数的环境变量名（与 a207-policy 的 env 注入约定一致）
 OTS_ENDPOINT_ENV = "A207_OTS_ENDPOINT"
 OTS_INSTANCE_ENV = "A207_OTS_INSTANCE_NAME"
 OTS_AK_ID_ENV = "A207_OTS_ACCESS_KEY_ID"
 OTS_AK_SECRET_ENV = "A207_OTS_ACCESS_KEY_SECRET"
+# 后端开关：缺省 tablestore（生产）；显式 "json" = 本地 JSON 开发模式
 STORAGE_BACKEND_ENV = "A207_STORAGE_BACKEND"
+
+# 本地 JSON 开发模式：写库文件名与数据目录 override（与 store.py 旧契约一致）
+LABS_STORE_FILENAME = "labs_store.json"
+LIS_DATA_DIR_ENV = "A207_LIS_DATA_DIR"
 
 # Tablestore 表名（单一事实源）
 TABLE_PATIENTS = "patients"
 TABLE_LABS = "labs"
 TABLE_LABS_STORE = "labs_store"
-TABLE_GUARDIAN_TOKENS = "guardian_tokens"
 
 # patients 表中嵌套结构序列化列名
 _PAT_NESTED_COLS = ("biochemistry", "food_diary_5d", "nutrition_ceiling",
@@ -87,21 +97,50 @@ class ClinicalDataRepository(Protocol):
         """枚举 LIS 数据集覆盖的 patient_id（供跨包联调核对，不暴露给 LLM）。"""
         ...
 
-    # ---- 监护人令牌库 ----
-    def load_guardian_tokens(self) -> dict[str, Any]:
-        """读取监护人令牌库（损坏时抛 RuntimeError，拒绝静默降级）。"""
-        ...
-
-    def save_guardian_tokens(self, tokens: dict[str, Any]) -> None:
-        """原子写监护人令牌库。"""
-        ...
-
 
 class LocalJsonRepository:
-    """本地 JSON 文件后端（现状实现，零行为变更）。
+    """本地 JSON 后端（v3.1 恢复：A207_STORAGE_BACKEND=json 本地开发模式）。
 
-    复用 store.py / his.py 的既有读取与原子写逻辑，避免双份实现漂移。
+    设计：
+    - 患者/基线读自随包静态数据（his.load_dataset / store.load_dataset，只读数据源）；
+    - 写库（upsert 化验）落 labs_store.json（A207_LIS_DATA_DIR override，原子写 +
+      fail-closed 损坏拒绝），自包含实现（不依赖 store.py 写库部分——v3.0 已删）。
     """
+
+    # ---- labs_store.json 辅助 ----
+
+    def _store_path(self) -> Path:
+        override = os.environ.get(LIS_DATA_DIR_ENV)
+        if override:
+            return Path(override) / LABS_STORE_FILENAME
+        return resolve_state_path(LABS_STORE_FILENAME)
+
+    def _load_records(self) -> list[dict[str, Any]]:
+        path = self._store_path()
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"检验写库 {LABS_STORE_FILENAME} JSON 损坏，拒绝加载（防止静默清空），"
+                f"请检查磁盘/恢复备份: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"检验写库 {LABS_STORE_FILENAME} 数据类型错误：期望 dict，"
+                f"实际为 {type(payload).__name__}，拒绝加载（防止静默清空）")
+        records = payload.get("records", [])
+        return records if isinstance(records, list) else []
+
+    def _save_records(self, records: list[dict[str, Any]]) -> None:
+        atomic_write_json(self._store_path(), {
+            "dataset": "a207-lis-mcp/labs_store",
+            "schema_version": "1.0.0",
+            "record_count": len(records),
+            "records": records,
+        })
+
+    # ---- 数据集元数据 ----
 
     def get_dataset_meta(self) -> dict[str, Any]:
         ds = _his.load_dataset()
@@ -112,16 +151,15 @@ class LocalJsonRepository:
             "patient_count": len(ds.get("patients", [])),
         }
 
+    # ---- HIS 患者主数据 ----
+
     def get_patient(self, patient_id: str) -> dict[str, Any] | None:
-        # 用公共 load_dataset 自行查找，不依赖 his 私有 _lookup 缓存
         for p in _his.load_dataset().get("patients", []):
             if p.get("patient_id") == patient_id:
                 return p
         return None
 
     def list_patients(self, criteria: dict[str, Any]) -> list[dict[str, Any]]:
-        # 直读数据集自行筛选（不复用 his.list_patients——业务层改走本接口后
-        # 会递归；筛选谓词复用 his._match 单一事实源，与业务层行为一致）。
         from .his import _match
 
         criteria = criteria or {}
@@ -143,37 +181,61 @@ class LocalJsonRepository:
     def all_patient_ids(self) -> list[str]:
         return [p["patient_id"] for p in _his.load_dataset().get("patients", [])]
 
+    # ---- LIS 化验数据 ----
+
     def get_panels(self, patient_id: str) -> list[dict[str, Any]]:
-        return _store.merged_panels(patient_id)
+        """基线 + 写库合并（同 sample_id 写库优先），按报告日期升序。"""
+        from . import store as _store
+
+        patient = _store.find_patient(patient_id)
+        panels: list[dict[str, Any]] = list(patient["panels"]) if patient else []
+        by_sample = {p["sample_id"]: dict(p) for p in panels}
+        for record in self._load_records():
+            if record.get("patient_id") != patient_id:
+                continue
+            sid = record.get("sample_id")
+            values = record.get("values")
+            if sid is None or record.get("report_date") is None or not isinstance(values, dict):
+                continue  # 脏记录跳过（S7 同口径）
+            by_sample[sid] = {
+                "sample_id": sid,
+                "report_date": record["report_date"],
+                "specimen": record.get("specimen"),
+                "values": values,
+                "source": "upsert",
+                "recorded_by": record.get("recorded_by"),
+            }
+        return sorted(by_sample.values(), key=lambda p: (p["report_date"], p["sample_id"]))
 
     def append_lab_record(self, record: dict[str, Any]) -> int:
-        return _store.append_record(record)
+        with _FILE_LOCK:
+            records = self._load_records()
+            records.append(record)
+            self._save_records(records)
+        return len(records)
 
     def known_lis_patient_ids(self) -> list[str]:
-        return _store.known_patient_ids()
-
-    def load_guardian_tokens(self) -> dict[str, Any]:
-        return _his._load_guardian_tokens()
-
-    def save_guardian_tokens(self, tokens: dict[str, Any]) -> None:
-        _his._save_guardian_tokens(tokens)
+        return [p["patient_id"] for p in _his.load_dataset().get("patients", [])]
 
 
 class TablestoreRepository:
-    """阿里云表格存储后端（v2.4 已实现，连接参数由 A207_OTS_* 环境变量注入）。
+    """阿里云表格存储后端（v3.0 起为默认后端）。
 
     设计要点：
-    - 行级写用 PutRow（幂等覆盖），天然支持多写者，替代 JSON 文件锁。
+    - 行级写用 PutRow（幂等覆盖），天然支持多写者。
     - patients 嵌套结构（biochemistry/food_diary_5d/nutrition_ceiling/...）序列化为
       JSON 字符串列，保持与 patients.json 数据结构完全一致，业务层零改动。
-    - labs 与 labs_store 分开存：get_panels 时按 sample_id 合并（写库优先），
-      与 store.merged_panels 语义一致。
+    - labs 与 labs_store 分开存：get_panels 时按 sample_id 合并（写库优先）。
     - 二级索引：36 患儿量级 list_patients 用全表 GetRange + 内存筛选即可，
       未来数据量上来再加 ckd_stage/age 二级索引（见 ensure_tables 注释）。
     - 连接参数缺失时 fail-fast 抛错，避免静默回退造成数据双写错乱。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, client: Any | None = None) -> None:
+        """client 仅供测试注入内存 Fake（生产不传，走 A207_OTS_* 环境变量）。"""
+        if client is not None:
+            self._client = client
+            return
         self.endpoint = os.environ.get(OTS_ENDPOINT_ENV)
         self.instance = os.environ.get(OTS_INSTANCE_ENV)
         self.ak_id = os.environ.get(OTS_AK_ID_ENV)
@@ -187,7 +249,8 @@ class TablestoreRepository:
         if missing:
             raise RuntimeError(
                 f"Tablestore 后端缺少连接参数：{', '.join(missing)}。"
-                f"请设置 A207_STORAGE_BACKEND=tablestore 时一并注入 A207_OTS_* 环境变量。")
+                f"请注入 A207_OTS_* 环境变量（A207_OTS_ENDPOINT / A207_OTS_INSTANCE_NAME / "
+                f"A207_OTS_ACCESS_KEY_ID / A207_OTS_ACCESS_KEY_SECRET）。")
         self._client = None  # 惰性建连（_get_client() 首次调用时）
 
     def _get_client(self):
@@ -408,39 +471,6 @@ class TablestoreRepository:
         rows = self._range_all(TABLE_LABS)
         return sorted({item["pk"]["patient_id"] for item in rows})
 
-    # ---- 监护人令牌库 ----
-
-    def load_guardian_tokens(self) -> dict[str, Any]:
-        rows = self._range_all(TABLE_GUARDIAN_TOKENS)
-        tokens: dict[str, Any] = {}
-        for item in rows:
-            pid = item["pk"]["patient_id"]
-            attrs = dict(item["attrs"])
-            token = attrs.get("token")
-            if token is None:
-                continue
-            tokens[pid] = {
-                "token": token,
-                "issued_at": attrs.get("issued_at"),
-                "expires_at": attrs.get("expires_at"),
-                "issued_by": attrs.get("issued_by"),
-            }
-        return tokens
-
-    def save_guardian_tokens(self, tokens: dict[str, Any]) -> None:
-        from tablestore import Condition, Row, RowExistenceExpectation
-
-        # 全量覆盖语义（与 JSON 原子写一致）：先清空再批量写
-        for item in self._range_all(TABLE_GUARDIAN_TOKENS):
-            row = Row([("patient_id", item["pk"]["patient_id"])])
-            self._get_client().delete_row(
-                TABLE_GUARDIAN_TOKENS, row,
-                Condition(RowExistenceExpectation.IGNORE))
-        for patient_id, payload in tokens.items():
-            attrs = {k: v for k, v in payload.items() if v is not None}
-            self._put_row(TABLE_GUARDIAN_TOKENS,
-                          [("patient_id", patient_id)], attrs)
-
 
 def ensure_tablestore_tables() -> None:
     """创建/校验 Tablestore 表（幂等，仅建缺失表）。
@@ -472,16 +502,16 @@ def ensure_tablestore_tables() -> None:
     _create(TABLE_PATIENTS, [("patient_id", "STRING")])
     _create(TABLE_LABS, [("patient_id", "STRING"), ("sample_id", "STRING")])
     _create(TABLE_LABS_STORE, [("patient_id", "STRING"), ("sample_id", "STRING")])
-    _create(TABLE_GUARDIAN_TOKENS, [("patient_id", "STRING")])
-    print(f"[ensure] Tablestore 表就绪：{sorted(existing | {TABLE_PATIENTS, TABLE_LABS, TABLE_LABS_STORE, TABLE_GUARDIAN_TOKENS})}")
+    print(f"[ensure] Tablestore 表就绪：{sorted(existing | {TABLE_PATIENTS, TABLE_LABS, TABLE_LABS_STORE})}")
 
 
 def get_repository() -> ClinicalDataRepository:
-    """按环境变量选择存储后端（默认本地 JSON，零回归）。"""
-    backend = os.environ.get(STORAGE_BACKEND_ENV, "json").strip().lower()
-    if backend == "tablestore":
-        return TablestoreRepository()
-    return LocalJsonRepository()
+    """按环境变量选择后端：缺省 tablestore（生产，缺 OTS 参数 fail-fast）；
+    显式 A207_STORAGE_BACKEND=json 用本地 JSON（开发模式）。"""
+    backend = os.environ.get(STORAGE_BACKEND_ENV, "tablestore").strip().lower()
+    if backend == "json":
+        return LocalJsonRepository()
+    return TablestoreRepository()
 
 
 __all__ = [
@@ -490,8 +520,8 @@ __all__ = [
     "TablestoreRepository",
     "ensure_tablestore_tables",
     "get_repository",
+    "STORAGE_BACKEND_ENV",
     "TABLE_PATIENTS",
     "TABLE_LABS",
     "TABLE_LABS_STORE",
-    "TABLE_GUARDIAN_TOKENS",
 ]

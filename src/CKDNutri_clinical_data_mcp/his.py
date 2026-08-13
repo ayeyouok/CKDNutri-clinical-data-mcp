@@ -174,8 +174,11 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
     token = secrets.token_urlsafe(GUARDIAN_TOKEN_BYTES)
     with _TOKEN_LOCK:  # BUG（2026-08-12）：RMW 持锁防并发签发 Lost Update
-        repo = _repo()
-        tokens = repo.load_guardian_tokens()
+        # v3.0（2026-08-13）：guardian_tokens 不落 Tablestore——家长绑定校验
+        # （a207_policy.verify_guardian_token，跨包共享层）只读 JSON 文件，
+        # 因此令牌库以 JSON 为**唯一事实源**，由本模块直接读写（不再经 repository）。
+        # 多实例部署的一致性靠 A207_GUARDIAN_TOKEN_DIR 指向共享持久目录保证。
+        tokens = _load_guardian_tokens()
         now = datetime.now(timezone.utc)
         tokens[patient_id] = {
             "token": token,
@@ -183,7 +186,7 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
             "expires_at": (now + timedelta(days=GUARDIAN_TOKEN_TTL_DAYS)).isoformat(timespec="seconds"),
             "issued_by": caller,
         }
-        repo.save_guardian_tokens(tokens)
+        _save_guardian_tokens(tokens)
     return {
         "ok": True,
         "data": {
