@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """CD-S1~CD-B4 回归测试（2026-08-14 修复后固化）。pytest + 直接运行双模式。"""
 import os
+os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 import sys
 from pathlib import Path
 
@@ -58,6 +59,57 @@ def test_cd_b4_age_at_report():
     # 无日期 → 回退当前年龄
     p2 = views.decorate_panel({"sample_id": "S2", "values": {"hb_g_L": 120.0}}, age=8.0, sex="F")
     assert p2["age_at_report"] == 8.0, p2
+
+
+def test_n_age1_trend_uses_sampling_age():
+    """N-AGE-1：趋势点按采样时年龄判参考区间（跨生日患儿不再套当前年龄带）。
+
+    当前 8 岁（school 27-62）、采样于 3 年前（当时 5 岁，preschool 20-42），
+    scr=50：preschool → high；school → normal。修复前统一用当前年龄误判 normal。
+    """
+    from datetime import date
+
+    from CKDNutri_clinical_data_mcp import views
+
+    trend = views.build_trend(
+        [{"sample_id": "S1", "report_date": "2023-08-14",
+          "values": {"scr_umol_L": 50.0}}],
+        "scr_umol_L", age=8.0, sex="F")
+    p0 = trend["points"][0]
+    assert p0["status"] == "high", p0  # 修复前（school 带 27-62）会误判 normal
+    assert 4.0 <= p0["age_at_report"] <= 6.0, p0["age_at_report"]
+    # 趋势级参考带用最新采样点的采样时年龄（preschool 20-42），非当前年龄 school
+    assert trend["ref_low"] == 20.0 and trend["ref_high"] == 42.0, trend
+    # 多面板：各点独立按各自采样时年龄判定
+    trend2 = views.build_trend(
+        [
+            {"sample_id": "S1", "report_date": "2023-08-14",
+             "values": {"scr_umol_L": 50.0}},   # 采样时 5 岁 → high
+            {"sample_id": "S2", "report_date": "2026-08-01",
+             "values": {"scr_umol_L": 50.0}},   # 采样时 ≈8 岁 → school normal
+        ],
+        "scr_umol_L", age=8.0, sex="F")
+    statuses = [pt["status"] for pt in trend2["points"]]
+    assert statuses == ["high", "in_range"], statuses
+
+
+def test_n_age2_future_report_date():
+    """N-AGE-2：未来 report_date 不虚增 eff_age（参考区间按当前年龄，单独告警）。"""
+    from CKDNutri_clinical_data_mcp import views
+
+    p = views.decorate_panel(
+        {"sample_id": "S1", "report_date": "2099-01-01",
+         "values": {"scr_umol_L": 50.0}},
+        age=5.0, sex="F")
+    assert p["age_at_report"] == 5.0, p  # 不虚增（修复前会 age + |负年限| > 5）
+    assert "未来" in (p.get("age_note") or ""), p
+    # build_trend 同口径
+    trend = views.build_trend(
+        [{"sample_id": "S1", "report_date": "2099-01-01",
+          "values": {"scr_umol_L": 50.0}}],
+        "scr_umol_L", age=5.0, sex="F")
+    pt = trend["points"][0]
+    assert pt["age_at_report"] == 5.0, pt
 
 
 if __name__ == "__main__":

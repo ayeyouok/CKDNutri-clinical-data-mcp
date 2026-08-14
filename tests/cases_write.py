@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 import re
 import sys
 from datetime import date
@@ -120,13 +121,16 @@ def _upsert_parent():
     assert "parent_assistant" in res["detail"], res
 
 
-@check("upsert / 写权仅医生助手，其余 caller 一律 FORBIDDEN")
+@check("upsert / 写权仅医生助手，其余 caller 一律拒绝（白名单内 FORBIDDEN / 白名单外 CallerUnknown）")
 def _upsert_others():
     for caller in DENIED_WRITERS:
-        with as_caller(caller):
-            res = core.upsert_lab_result(
-                "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5}
-            )
+        try:
+            with as_caller(caller):
+                res = core.upsert_lab_result(
+                    "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5}
+                )
+        except CallerUnknown:
+            continue  # N-CALLER-1（2026-08-14）：白名单外身份（nutritionist 等）身份层即拒
         assert res["ok"] is False and res["error"] == "FORBIDDEN", (caller, res)
 
 
@@ -134,10 +138,13 @@ def _upsert_others():
 def _upsert_no_side_effect():
     before = fake_labs_store_count()
     for caller in DENIED_WRITERS:
-        with as_caller(caller):
-            core.upsert_lab_result(
-                "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5}
-            )
+        try:
+            with as_caller(caller):
+                core.upsert_lab_result(
+                    "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5}
+                )
+        except CallerUnknown:
+            continue  # N-CALLER-1：白名单外身份被拒，同样无副作用
     assert fake_labs_store_count() == before, "越权调用仍然改动了写库"
 
 

@@ -20,8 +20,8 @@ JSON 字符串列，与 repository.TablestoreRepository._deserialize_patient 对
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,8 @@ from .repository import (
     TablestoreRepository,
     ensure_tablestore_tables,
 )
+
+logger = logging.getLogger("CKDNutri-clinical-data-mcp.migrate")
 
 SRC = Path(__file__).resolve().parent
 
@@ -85,7 +87,7 @@ def migrate() -> dict[str, int]:
         attrs = repo._serialize_patient(p)
         repo._put_row(TABLE_PATIENTS, repo._pk_patient(p["patient_id"]), attrs)
     counts[TABLE_PATIENTS] = len(patients)
-    print(f"[migrate] patients 表写入 {len(patients)} 条")
+    logger.info("[migrate] patients 表写入 %s 条", len(patients))
 
     # 2) labs 基线面板（每患儿 panels 展开为独立行）
     lab_rows = 0
@@ -102,7 +104,7 @@ def migrate() -> dict[str, int]:
             repo._put_row(TABLE_LABS, repo._pk_lab(pid, panel["sample_id"]), attrs)
             lab_rows += 1
     counts[TABLE_LABS] = lab_rows
-    print(f"[migrate] labs 表写入 {lab_rows} 条")
+    logger.info("[migrate] labs 表写入 %s 条", lab_rows)
 
     # 3) labs_store 旧写库（v3.0 前的 upsert 记录，一次性历史迁移）
     store_rows = 0
@@ -121,20 +123,23 @@ def migrate() -> dict[str, int]:
             else:
                 raise
     counts[TABLE_LABS_STORE] = store_rows
-    print(f"[migrate] labs_store 表写入 {store_rows} 条（历史 JSON 写库），"
-          f"跳过已存在 {store_skipped} 条（幂等重跑）")
+    logger.info("[migrate] labs_store 表写入 %s 条（历史 JSON 写库），跳过已存在 %s 条（幂等重跑）",
+                store_rows, store_skipped)
 
     # 4) guardian_tokens 不再迁移：令牌库 JSON 文件是 a207-policy 校验的事实源
     #    （his.issue_guardian_token 直接读写 JSON，与 Tablestore 无关）。
-    print("[migrate] guardian_tokens 跳过迁移（JSON 文件为校验事实源）")
+    logger.info("[migrate] guardian_tokens 跳过迁移（JSON 文件为校验事实源）")
 
     return counts
 
 
 if __name__ == "__main__":
+    # N-LOG-1（2026-08-14）：统一 logging（生产 stdout 可采集），不再裸 print
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
     os.environ.setdefault("A207_CALLER", "doctor_assistant")
     try:
         migrate()
     except Exception as exc:  # noqa: BLE001
-        print(f"迁移失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.error("[migrate] 迁移失败：%s: %s", type(exc).__name__, exc)
         raise SystemExit(1)

@@ -25,6 +25,29 @@ _EPSILON = 1e-10
 TREND_ARROW = {"up": "↑", "down": "↓", "flat": "→"}
 
 
+def _eff_age_at(age: float, report_date: Any) -> tuple[float, date | None, str | None]:
+    """按采样日期推算采样时年龄（N-AGE-1：decorate_panel/build_trend 共用，杜绝双轨）。
+
+    返回 (eff_age, rd_date, warn)：
+    - report_date 缺失/非法 → (age, None, None)：回退当前年龄，不告警；
+    - report_date 在未来 → (age, rd_date, "future")：N-AGE-2——不推算（推算会
+      yrs_since<0 → eff_age 虚增超过当前年龄，参考区间被套到更老龄段失真），
+      回退当前年龄并单独告警；
+    - 正常 → (max(0.0, age - yrs_since), rd_date, None)：采样时年龄。
+    """
+    if not report_date:
+        return age, None, None
+    try:
+        rd_date = date.fromisoformat(str(report_date)[:10])
+    except ValueError:
+        return age, None, None
+    today = date.today()
+    if rd_date > today:
+        return age, rd_date, "future"
+    yrs_since = (today - rd_date).days / 365.25
+    return max(0.0, age - yrs_since), rd_date, None
+
+
 def decorate_panel(panel: dict[str, Any], age: float, sex: str) -> dict[str, Any]:
     """给一次采样的每个指标补上单位、儿童参考区间与状态判定。
 
@@ -32,20 +55,17 @@ def decorate_panel(panel: dict[str, Any], age: float, sex: str) -> dict[str, Any
     历史采样（如 5 岁采的样、现在 8 岁）会套用 8 岁参考区间，跨年面板年龄别区间
     失真。采样时年龄 ≈ 当前年龄 −（今天 − report_date）年；日期缺失/非法回退当前
     年龄。结果附 age_at_report 便于审计。
+    N-AGE-1/2（2026-08-14）：eff_age 推算抽到 _eff_age_at 共用（与 build_trend
+    单实现，杜绝双轨）；未来日期不推算并单独告警。
     """
-    eff_age = age
+    eff_age, rd_date, warn = _eff_age_at(age, panel.get("report_date"))
     age_note = None
-    rd = panel.get("report_date")
-    if rd:
-        try:
-            rd_date = date.fromisoformat(str(rd)[:10])
-            yrs_since = (date.today() - rd_date).days / 365.25
-            eff_age = max(0.0, age - yrs_since)
-            if abs(eff_age - age) > 0.05:
-                age_note = (f"按采样日期 {rd_date.isoformat()} 推算采样时年龄 "
-                            f"{eff_age:.1f} 岁（当前 {age:.1f} 岁），参考区间按采样时年龄判定")
-        except ValueError:
-            pass  # 日期解析失败退回当前年龄
+    if warn == "future":
+        age_note = (f"report_date {rd_date.isoformat()} 在未来（数据异常），"
+                    f"参考区间按当前年龄 {age:.1f} 岁判定（未做采样时年龄推算）")
+    elif rd_date is not None and abs(eff_age - age) > 0.05:
+        age_note = (f"按采样日期 {rd_date.isoformat()} 推算采样时年龄 "
+                    f"{eff_age:.1f} 岁（当前 {age:.1f} 岁），参考区间按采样时年龄判定")
     results = []
     for analyte, value in panel.get("values", {}).items():
         meta = ANALYTES.get(analyte)
@@ -118,18 +138,27 @@ def linear_slope_per_30d(points: list[dict[str, Any]]) -> float | None:
 def build_trend(
     panels: list[dict[str, Any]], analyte: str, age: float, sex: str
 ) -> dict[str, Any]:
-    """指定指标的时间序列 + 环比变化率 + 斜率。"""
+    """指定指标的时间序列 + 环比变化率 + 斜率。
+
+    N-AGE-1 修复（2026-08-14）：每个历史点按**采样时年龄**（report_date 推算）判
+    status/参考区间——此前统一用患者当前年龄，跨生日患儿（如 5 岁采样、现 8 岁）
+    趋势把历史点套 8 岁区间，与 decorate_panel（CD-B4 采样时年龄）双轨失真。
+    实现抽 _eff_age_at 与 decorate_panel 共用，杜绝双轨。points 附 age_at_report；
+    趋势级参考带用**最新采样点**的采样时年龄（与最新 status 一致）。
+    """
     meta = ANALYTES[analyte]
     points = []
     for panel in panels:
         value = panel.get("values", {}).get(analyte)
         if value is None:
             continue
-        status = classify(analyte, float(value), age, sex)
+        point_age, _, _ = _eff_age_at(age, panel.get("report_date"))
+        status = classify(analyte, float(value), point_age, sex)
         points.append(
             {
                 "report_date": panel["report_date"],
                 "value": float(value),
+                "age_at_report": round(point_age, 2),
                 "status": status,
                 "status_label": STATUS_LABEL[status],
             }
@@ -143,7 +172,9 @@ def build_trend(
         if previous not in (None, 0)
         else None
     )
-    interval = reference_interval(analyte, age, sex)
+    # N-AGE-1：趋势级参考带用最新采样点的采样时年龄（与最新 status 口径一致）
+    ref_age = points[-1]["age_at_report"] if points else age
+    interval = reference_interval(analyte, ref_age, sex)
     return {
         "analyte": analyte,
         "label": meta["label"],

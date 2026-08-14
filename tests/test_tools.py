@@ -10,6 +10,8 @@
 """
 
 from __future__ import annotations
+import os
+os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 
 import sys
 from pathlib import Path

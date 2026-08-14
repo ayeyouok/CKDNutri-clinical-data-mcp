@@ -1,10 +1,12 @@
 """只读工具用例：数据集完整性、get_labs、get_critical_values、get_lab_trend。"""
 
 from __future__ import annotations
+import os
+os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 
 import re
 
-from a207_policy import as_caller
+from a207_policy import CallerUnknown, as_caller
 
 from harness import check
 
@@ -99,11 +101,14 @@ def _labs_risk():
         assert core.get_labs("P0013")["ok"] is True
 
 
-@check("get_labs / 营养师·患儿伙伴·调度 被拒")
+@check("get_labs / 营养师·患儿伙伴·调度 被拒（N-CALLER-1：未知角色身份层即拒）")
 def _labs_denied():
     for caller in ("nutritionist", "child_companion", "orchestrator", "unknown_agent"):
-        with as_caller(caller):
-            res = core.get_labs("P0013")
+        try:
+            with as_caller(caller):
+                res = core.get_labs("P0013")
+        except CallerUnknown:
+            continue  # N-CALLER-1（2026-08-14）：白名单外身份在 get_caller 即拒（更早、更强）
         assert res["ok"] is False and res["error"] == "FORBIDDEN", (caller, res)
 
 

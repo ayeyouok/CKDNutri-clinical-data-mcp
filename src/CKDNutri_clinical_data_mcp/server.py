@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 
 from typing import Any
 
@@ -71,7 +70,7 @@ def main():
     # v3.0 启动自检（唯一后端 = Tablestore）：验证 OTS 连通性。
     # P1-9 修复（2026-08-13）：**自检失败 fail-fast 退出（非零码）**——此前仅打日志
     # 继续 mcp.run()，部署后"服务活着但每个工具 INTERNAL_ERROR"（比启动失败更难发现，
-    # 医疗数据读写全挂）。现在自检失败 → stderr 提示 + sys.exit(1)，魔搭/HAIP 部署
+    # 医疗数据读写全挂）。现在自检失败 → stderr 提示 + SystemExit(1)，魔搭/HAIP 部署
     # 立即暴露，不静默带病运行。
     try:
         from .repository import TablestoreRepository
@@ -82,9 +81,11 @@ def main():
     except Exception as exc:  # noqa: BLE001 - 自检失败必须阻断启动（fail-fast）
         logger.error("[ots-selfcheck] FAIL 无法连接表格存储：%s: %s",
                      type(exc).__name__, str(exc)[:200])
-        print(
-            f"[ots-selfcheck] FAIL 无法连接表格存储（{type(exc).__name__}）。"
-            f"检查 A207_OTS_* 环境变量与网络后重试；服务未启动。", file=sys.stderr)
+        # N-LOG-1（2026-08-14）：冗余 stderr print 并入 logger.error（默认输出
+        # 到 stderr，统一采集口径）——此前 logger.error 已打，print 仅重复。
+        logger.error(
+            "[ots-selfcheck] FAIL 无法连接表格存储（%s）。检查 A207_OTS_* "
+            "环境变量与网络后重试；服务未启动。", type(exc).__name__)
         raise SystemExit(1) from exc
     mcp.run()
 

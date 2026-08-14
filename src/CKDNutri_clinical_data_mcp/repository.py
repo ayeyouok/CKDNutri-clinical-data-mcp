@@ -554,12 +554,13 @@ def ensure_tablestore_tables() -> None:
         options = TableOptions(time_to_live=-1, max_version=1)
         throughput = ReservedThroughput(capacity_unit=CapacityUnit(0, 0))  # 按量计费
         client.create_table(meta, options, throughput)
-        print(f"[ensure] 已创建表 {table_name}")
+        logger.info("[ensure] 已创建表 %s", table_name)
 
     _create(TABLE_PATIENTS, [("patient_id", "STRING")])
     _create(TABLE_LABS, [("patient_id", "STRING"), ("sample_id", "STRING")])
     _create(TABLE_LABS_STORE, [("patient_id", "STRING"), ("sample_id", "STRING")])
-    print(f"[ensure] Tablestore 表就绪：{sorted(existing | {TABLE_PATIENTS, TABLE_LABS, TABLE_LABS_STORE})}")
+    logger.info("[ensure] Tablestore 表就绪：%s",
+                sorted(existing | {TABLE_PATIENTS, TABLE_LABS, TABLE_LABS_STORE}))
 
 
 def get_repository() -> ClinicalDataRepository:
