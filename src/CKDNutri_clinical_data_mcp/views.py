@@ -26,14 +26,33 @@ TREND_ARROW = {"up": "↑", "down": "↓", "flat": "→"}
 
 
 def decorate_panel(panel: dict[str, Any], age: float, sex: str) -> dict[str, Any]:
-    """给一次采样的每个指标补上单位、儿童参考区间与状态判定。"""
+    """给一次采样的每个指标补上单位、儿童参考区间与状态判定。
+
+    CD-B4 修复（2026-08-14）：参考区间按**采样时年龄**判定——此前用患者当前年龄，
+    历史采样（如 5 岁采的样、现在 8 岁）会套用 8 岁参考区间，跨年面板年龄别区间
+    失真。采样时年龄 ≈ 当前年龄 −（今天 − report_date）年；日期缺失/非法回退当前
+    年龄。结果附 age_at_report 便于审计。
+    """
+    eff_age = age
+    age_note = None
+    rd = panel.get("report_date")
+    if rd:
+        try:
+            rd_date = date.fromisoformat(str(rd)[:10])
+            yrs_since = (date.today() - rd_date).days / 365.25
+            eff_age = max(0.0, age - yrs_since)
+            if abs(eff_age - age) > 0.05:
+                age_note = (f"按采样日期 {rd_date.isoformat()} 推算采样时年龄 "
+                            f"{eff_age:.1f} 岁（当前 {age:.1f} 岁），参考区间按采样时年龄判定")
+        except ValueError:
+            pass  # 日期解析失败退回当前年龄
     results = []
     for analyte, value in panel.get("values", {}).items():
         meta = ANALYTES.get(analyte)
         if meta is None or value is None:
             continue
-        interval = reference_interval(analyte, age, sex)
-        status = classify(analyte, float(value), age, sex)
+        interval = reference_interval(analyte, eff_age, sex)
+        status = classify(analyte, float(value), eff_age, sex)
         results.append(
             {
                 "analyte": analyte,
@@ -46,13 +65,17 @@ def decorate_panel(panel: dict[str, Any], age: float, sex: str) -> dict[str, Any
                 "status_label": STATUS_LABEL[status],
             }
         )
-    return {
+    out = {
         "sample_id": panel.get("sample_id"),
         "report_date": panel.get("report_date"),
         "specimen": panel.get("specimen"),
         "source": panel.get("source", "baseline"),
+        "age_at_report": round(eff_age, 2),
         "results": results,
     }
+    if age_note:
+        out["age_note"] = age_note
+    return out
 
 
 def trend_code(current: float, previous: float | None, analyte: str) -> str:

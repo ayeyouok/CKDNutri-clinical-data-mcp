@@ -204,6 +204,8 @@ class LocalJsonRepository:
                 "values": values,
                 "source": "upsert",
                 "recorded_by": record.get("recorded_by"),
+                # CD-B3：读回对称（Tablestore 序列化已补，双后端形状一致）
+                "recorded_at": record.get("recorded_at"),
             }
         return sorted(by_sample.values(), key=lambda p: (p["report_date"], p["sample_id"]))
 
@@ -465,6 +467,8 @@ class TablestoreRepository:
                     "specimen": attrs.get("specimen"),
                     "values": values,
                     "recorded_by": attrs.get("recorded_by"),
+                    # CD-B3：读回对称（序列化已补 recorded_at，双后端形状一致）
+                    "recorded_at": attrs.get("recorded_at"),
                 }
                 # 仅写库行（TABLE_LABS_STORE）带 source=upsert；基线行不带
                 # （与 LocalJson merged_panels 行为对齐：基线无 source 键）。
@@ -483,6 +487,10 @@ class TablestoreRepository:
             "values": json.dumps(record.get("values", {}), ensure_ascii=False),
             "source": "upsert",
             "recorded_by": record.get("recorded_by"),
+            # CD-B3 修复（2026-08-14）：补 recorded_at——此前序列化静默丢弃该列
+            # （JSON 端全量保留），双后端数据形状不一致：Tablestore 读回的记录
+            # 无写入时间戳，审计/时间序列缺失。
+            "recorded_at": record.get("recorded_at"),
         }
         # B1 修复（2026-08-13）：EXPECT_NOT_EXIST 条件写——主键已存在（sample_id 撞）
         # 抛 OTSClientError 而非覆盖，杜绝并发写入静默丢数据。

@@ -70,14 +70,16 @@ class LabResultIn(_Strict):
     urine_protein_g_24h: float | None = Field(default=None, ge=0, le=30)
     upcr_mg_mmol: float | None = Field(default=None, ge=0, le=3000)
 
-    # 异口径别名，入口换算
-    scr_mg_dL: float | None = Field(default=None, ge=0, le=40)
-    bun_mg_dL: float | None = Field(default=None, ge=0, le=250)
-    p_mg_dL: float | None = Field(default=None, ge=0, le=25)
-    ca_mg_dL: float | None = Field(default=None, ge=0, le=25)
+    # 异口径别名，入口换算（CD-B1 修复 2026-08-14：上限与契约 mmol/L 口径对齐——
+    # 此前 p_mg_dL≤25 → 25×0.3229=8.07 > 契约 p_mmol_L≤8，别名放行但归一化拒绝的
+    # "陷阱带"；scr/bun/ca/ua 同类越界一并修正。上限 = 契约上限 ÷ 换算系数）
+    scr_mg_dL: float | None = Field(default=None, ge=0, le=33)   # 3000/88.4
+    bun_mg_dL: float | None = Field(default=None, ge=0, le=224)  # 80/0.357
+    p_mg_dL: float | None = Field(default=None, ge=0, le=24)     # 8/0.3229
+    ca_mg_dL: float | None = Field(default=None, ge=0, le=24)    # 6/0.2495
     hb_g_dL: float | None = Field(default=None, ge=0, le=25)
     albumin_g_dL: float | None = Field(default=None, ge=0, le=8)
-    ua_mg_dL: float | None = Field(default=None, ge=0, le=30)
+    ua_mg_dL: float | None = Field(default=None, ge=0, le=25)    # 1500/59.48
 
     @model_validator(mode="after")
     def _check_report_date(self):

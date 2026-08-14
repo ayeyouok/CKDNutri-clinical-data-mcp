@@ -106,11 +106,23 @@ def migrate() -> dict[str, int]:
 
     # 3) labs_store 旧写库（v3.0 前的 upsert 记录，一次性历史迁移）
     store_rows = 0
+    store_skipped = 0
     for record in _load_labs_store():
-        repo.append_lab_record(record)
-        store_rows += 1
+        # CD-S2 修复（2026-08-14）：迁移**幂等可重跑**——append_lab_record 用
+        # EXPECT_NOT_EXIST 条件写（B1 防并发覆盖），第二次运行同 sample_id 必抛
+        # RuntimeError（部分迁移后无法重跑补齐、无事务）。已存在视为"已迁移"跳过
+        # 并计数，不中断；patients/labs 基线本就 IGNORE 覆盖幂等。
+        try:
+            repo.append_lab_record(record)
+            store_rows += 1
+        except RuntimeError as exc:
+            if "已存在" in str(exc) or "sample_id" in str(exc):
+                store_skipped += 1
+            else:
+                raise
     counts[TABLE_LABS_STORE] = store_rows
-    print(f"[migrate] labs_store 表写入 {store_rows} 条（历史 JSON 写库）")
+    print(f"[migrate] labs_store 表写入 {store_rows} 条（历史 JSON 写库），"
+          f"跳过已存在 {store_skipped} 条（幂等重跑）")
 
     # 4) guardian_tokens 不再迁移：令牌库 JSON 文件是 a207-policy 校验的事实源
     #    （his.issue_guardian_token 直接读写 JSON，与 Tablestore 无关）。
