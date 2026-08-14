@@ -40,6 +40,12 @@ logger = logging.getLogger("CKDNutri-clinical-data-mcp.repository")
 # LocalJson 后端写库 RMW 并发保护（单进程内串行化；Tablestore 端行级原子无需）
 _FILE_LOCK = threading.Lock()
 
+# C3 修复（2026-08-14）：repository 实例缓存（按 backend 缓存，对齐 care/nutrition 单例）——
+# 此前 get_repository() 每请求新建实例（Tablestore 端每请求新建 OTSClient 连接池），
+# repository.py:267 注释自称"单例"失实。缓存实例避免每请求重握手。
+_REPO_CACHE: dict[str, "ClinicalDataRepository"] = {}
+_REPO_LOCK = threading.Lock()
+
 # Tablestore 连接参数的环境变量名（与 a207-policy 的 env 注入约定一致）
 OTS_ENDPOINT_ENV = "A207_OTS_ENDPOINT"
 OTS_INSTANCE_ENV = "A207_OTS_INSTANCE_NAME"
@@ -558,11 +564,19 @@ def ensure_tablestore_tables() -> None:
 
 def get_repository() -> ClinicalDataRepository:
     """按环境变量选择后端：缺省 tablestore（生产，缺 OTS 参数 fail-fast）；
-    显式 A207_STORAGE_BACKEND=json 用本地 JSON（开发模式）。"""
+    显式 A207_STORAGE_BACKEND=json 用本地 JSON（开发模式）。
+    C3 修复（2026-08-14）：实例按 backend 缓存（double-checked locking）——此前每请求
+    新建 TablestoreRepository（每请求新建 OTSClient 连接池），注释"单例"失实。"""
     backend = os.environ.get(STORAGE_BACKEND_ENV, "tablestore").strip().lower()
-    if backend == "json":
-        return LocalJsonRepository()
-    return TablestoreRepository()
+    repo = _REPO_CACHE.get(backend)
+    if repo is None:
+        with _REPO_LOCK:
+            repo = _REPO_CACHE.get(backend)
+            if repo is None:
+                repo = (LocalJsonRepository() if backend == "json"
+                        else TablestoreRepository())
+                _REPO_CACHE[backend] = repo
+    return repo
 
 
 __all__ = [
