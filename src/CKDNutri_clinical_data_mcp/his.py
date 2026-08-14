@@ -22,6 +22,7 @@ from typing import Any
 
 from a207_policy import (
     CLINICIAN_ONLY_FIELDS,
+    PARENT_ROLE,
     HIS_ALLOWED_FILTER_KEYS,
     HIS_COHORT,
     P1_PARENT_HIDDEN_FIELDS,
@@ -288,7 +289,7 @@ def load_dataset(force_reload: bool = False) -> dict[str, Any]:
 def _guard_guardian(caller: str, patient_id: str, guardian_token: str | None,
                     tool: str) -> dict[str, Any] | None:
     """家长助手每次读取前必须通过绑定核验，缺 token 即拒绝，不给降级视图。"""
-    if caller != "parent_assistant":
+    if caller != PARENT_ROLE:
         return None
     if not guardian_token:
         return _err("GUARDIAN_UNVERIFIED",
@@ -313,7 +314,7 @@ def _token_matches(patient_id: str, guardian_token: str) -> bool:
 def _scope_of(caller: str) -> str:
     # BUG-31（2026-08-12）：删除退役角色 nutritionist 分支（v2.3 阶段 0 已退役，
     # CALLERS 仅剩 3 个身份）；家长受限视图、其余（doctor/risk）全量。
-    if caller == "parent_assistant":
+    if caller == PARENT_ROLE:
         return "limited_parent"
     return "full"
 

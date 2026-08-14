@@ -385,8 +385,13 @@ class TablestoreRepository:
             if key in _PAT_NESTED_COLS and isinstance(value, str):
                 try:
                     patient[key] = json.loads(value)
-                except json.JSONDecodeError:
-                    patient[key] = value
+                except json.JSONDecodeError as exc:
+                    # X1（2026-08-14）：损坏 JSON 抛错 fail-closed（对齐 nutrition/care
+                    # Tablestore 端同口径）——此前静默回退原始字符串，读回形状异常且
+                    # 无任何告警，后续处理（如按 dict 遍历）会静默丢数据或 TypeError。
+                    raise RuntimeError(
+                        f"患者档案列 {key} 损坏（非法 JSON）：{exc}——拒绝静默降级，"
+                        "请人工修复 Tablestore 该行数据") from exc
             else:
                 patient[key] = value
         return patient
@@ -456,8 +461,12 @@ class TablestoreRepository:
                 if isinstance(values, str):
                     try:
                         values = json.loads(values)
-                    except json.JSONDecodeError:
-                        values = {}
+                    except json.JSONDecodeError as exc:
+                        # X1（2026-08-14）：损坏 JSON 抛错 fail-closed——此前静默置 {}，
+                        # 化验数值整块丢失且无告警（家长/医生看到空面板，误以为无数据）。
+                        raise RuntimeError(
+                            f"化验行 values 损坏（非法 JSON，sample_id={sid}）：{exc}——"
+                            "拒绝静默丢弃数值，请人工修复 Tablestore 该行数据") from exc
                 if not isinstance(values, dict):
                     continue
                 src = attrs.get("source")

@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from a207_policy import (
     LIS_CRITICAL_CHANNEL,
+    PARENT_ROLE,
     LIS_READ_FULL,
     LIS_READ_LIMITED,
     get_caller,
@@ -152,7 +153,7 @@ def get_critical_values(
     # 告知危急值）。家长分支仍强制 guardian_token（防跨患者读取），但不落
     # CRITICAL_CHANNEL 通知链路（通知是 doctor/risk_warning 的职责）。
     if caller not in CRITICAL_CHANNEL:
-        if caller != "parent_assistant":
+        if caller != PARENT_ROLE:
             return forbidden(caller, "get_critical_values")
         return {
             "ok": True,
@@ -260,7 +261,7 @@ def get_lab_trend(
     # 2026-08-13（用户决策）：家长可见完整数值趋势（知情权）——与医生同构
     # build_trend 结果（含 point 数值/环比/斜率），data_scope="parent_full"。
     if caller not in READ_FULL:
-        if caller != "parent_assistant":
+        if caller != PARENT_ROLE:
             return forbidden(caller, "get_lab_trend")
         trend = build_trend(
             panels, query.analyte, float(patient["age_years"]), patient["sex"]
