@@ -360,10 +360,12 @@ class TablestoreRepository(TablestoreBase):
         （与 LocalJson 端 merged_panels 行为一致），写库行带 source="upsert"。
         """
         panels: dict[str, dict[str, Any]] = {}
+        # #6（2026-08-15）：双表改用主键前缀范围扫——此前全表 GetRange 后内存过滤
+        # patient_id；labs/labs_store 是复合主键 (patient_id, sample_id)，前缀扫
+        # 只拉该患者行，性能与患者总数解耦（对齐 LOW-4 append_lab_record 口径）。
         for table in (TABLE_LABS, TABLE_LABS_STORE):
-            for item in self._range_all(table, ["patient_id", "sample_id"]):
-                if item["pk"].get("patient_id") != patient_id:
-                    continue
+            for item in self._range_all(table, ["patient_id", "sample_id"],
+                                        prefix={"patient_id": patient_id}):
                 attrs = dict(item["attrs"])
                 sid = item["pk"]["sample_id"]
                 if sid is None or attrs.get("report_date") is None:

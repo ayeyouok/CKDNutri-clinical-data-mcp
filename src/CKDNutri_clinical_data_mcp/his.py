@@ -170,15 +170,21 @@ class _CrossProcessTokenLock:
     def __enter__(self):
         import os
 
+        # #12（2026-08-15）：open 成功后加锁失败也要关闭句柄——此前 lock 抛异常
+        # 时 _fh 泄漏（句柄不释放，重试多次会耗尽文件描述符）。
         self._fh = open(_guardian_lock_path(), "a+", encoding="utf-8")
         try:
-            import msvcrt  # Windows
+            try:
+                import msvcrt  # Windows
 
-            msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
-        except ImportError:
-            import fcntl  # POSIX
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+            except ImportError:
+                import fcntl  # POSIX
 
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        except BaseException:
+            self._fh.close()
+            raise
         return self
 
     def __exit__(self, *exc):

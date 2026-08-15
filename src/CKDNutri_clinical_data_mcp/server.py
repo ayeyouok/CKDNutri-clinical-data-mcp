@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import logging
 
-from typing import Any
+from typing import Any, Optional
 
 from fastmcp import FastMCP
 
@@ -71,7 +71,7 @@ def main():
 # ---- M1: 患者主索引 ----
 
 @mcp.tool
-def get_patient_profile_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
+def get_patient_profile_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
     """查患儿完整档案（人口学+诊断），家庭助手需携带 guardian_token。"""
     try:
         return get_patient_profile(patient_id, guardian_token)
@@ -80,7 +80,7 @@ def get_patient_profile_tool(patient_id: str, guardian_token: str = "") -> dict[
 
 
 @mcp.tool
-def get_diagnosis_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
+def get_diagnosis_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
     """查确诊信息（CKD 分期/原发病/透析状态）。家庭助手需携带 guardian_token。"""
     try:
         return get_diagnosis(patient_id, guardian_token)
@@ -131,7 +131,7 @@ def list_patients_tool(filter: dict = None, page: int = 1, page_size: int = 50) 
 
 
 @mcp.tool
-def get_nutrition_ceiling_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
+def get_nutrition_ceiling_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
     """查营养上限设定。"""
     try:
         return get_nutrition_ceiling(patient_id, guardian_token)
@@ -142,7 +142,7 @@ def get_nutrition_ceiling_tool(patient_id: str, guardian_token: str = "") -> dic
 # ---- M2: 化验面板 ----
 
 @mcp.tool
-def get_labs_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
+def get_labs_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
     """查最新化验面板（2026-08-13 起家长可见完整化验数值，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_labs(patient_id, guardian_token)
@@ -151,7 +151,7 @@ def get_labs_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
 
 
 @mcp.tool
-def get_critical_values_tool(patient_id: str, guardian_token: str = "") -> dict[str, Any]:
+def get_critical_values_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
     """查当前危急值明细（2026-08-13 起家长可见命中明细，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_critical_values(patient_id, guardian_token)
@@ -161,7 +161,7 @@ def get_critical_values_tool(patient_id: str, guardian_token: str = "") -> dict[
 
 @mcp.tool
 def get_lab_trend_tool(patient_id: str, analyte: str, window_days: int = None,
-                       guardian_token: str = "") -> dict[str, Any]:
+                       guardian_token: Optional[str] = None) -> dict[str, Any]:
     """查指定指标最近 N 次趋势（2026-08-13 起家长可见完整数值趋势，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_lab_trend(patient_id, analyte, window_days, guardian_token)

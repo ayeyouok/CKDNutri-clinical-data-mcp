@@ -150,6 +150,24 @@ class FakeOtsClient:
         names = self._pk_names(table)
         rows = [_FakeRow(list(zip(names, key)), attrs)
                 for key, attrs in sorted(self.tables[table].items())]
+        # #6（2026-08-15）：模拟主键前缀范围——storage._range_all 的 prefix 参数
+        # 经 start/end 的 INF_MIN/INF_MAX 表达"该前缀段"；Fake 此前忽略边界返回
+        # 全表，带 prefix 的调用（get_panels/append_lab_record）会读到所有患者数据
+        # （跨患者串数据）。按 start/end 中非 INF 的列值过滤。
+        from tablestore import INF_MAX, INF_MIN
+
+        def _is_inf(v):
+            return v is INF_MIN or v is INF_MAX or v == INF_MIN or v == INF_MAX
+
+        def _within(pk_row):
+            for (col, lo), (_, hi) in zip(start, end):
+                if not _is_inf(lo) and pk_row.get(col) < lo:
+                    return False
+                if not _is_inf(hi) and pk_row.get(col) > hi:
+                    return False
+            return True
+
+        rows = [r for r in rows if _within(dict(r.primary_key))]
         return None, None, rows, None
 
 
