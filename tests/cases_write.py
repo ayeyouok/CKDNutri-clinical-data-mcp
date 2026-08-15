@@ -279,7 +279,7 @@ def _reference_age_aware():
     assert boy != girl, (boy, girl)
 
 
-@check("B1 / 服务端生成 sample_id 为碰撞免疫 uuid（不随面板数自增）")
+@check("B1 / 服务端生成 sample_id 为确定性幂等哈希（S-2 起取代 uuid）")
 def _b1_uuid_sample_id():
     with as_caller("doctor_assistant"):
         res = core.upsert_lab_result(
@@ -287,17 +287,26 @@ def _b1_uuid_sample_id():
         )
     assert res["ok"] is True, res
     sid = res["data"]["sample_id"]
-    # uuid4 hex8：格式 pid-U + 8 位十六进制；不再依赖面板计数（避免并发碰撞）
-    assert sid.startswith("P0013-U"), sid
-    tail = sid[len("P0013-U"):]
+    # S-2（2026-08-15）：无显式 sample_id 时生成**确定性幂等哈希**（pid-S + 8 位
+    # sha1）——同日期同指标名-值 → 同 id（LIS 超时重试幂等，不落两行）；此前 uuid4
+    # 每次不同，重试同一化验落两行。格式：pid-S + 8 位十六进制。
+    assert sid.startswith("P0013-S"), sid
+    tail = sid[len("P0013-S"):]
     assert len(tail) == 8 and all(c in "0123456789abcdef" for c in tail), sid
-    # 两次不传 sample_id 必须得到不同 ID（碰撞免疫）
+    # 同日期同值重试 → **同 id**（幂等，S-2 新增语义）
+    with as_caller("doctor_assistant"):
+        res1b = core.upsert_lab_result(
+            "P0013", {"report_date": _TODAY, "k_mmol_L": 4.8},
+        )
+    assert res1b["data"]["sample_id"] == sid, "同值重试应幂等命中同 id"
+    assert res1b["data"].get("idempotent_hit") is True, "重试应标记幂等命中"
+    # 不同指标集 → 不同 id（碰撞免疫）
     with as_caller("doctor_assistant"):
         res2 = core.upsert_lab_result(
             "P0013", {"report_date": _TODAY, "na_mmol_L": 140.0},
         )
     assert res2["ok"] is True, res2
-    assert res2["data"]["sample_id"] != sid, "两次 upsert 生成了相同 sample_id"
+    assert res2["data"]["sample_id"] != sid, "不同指标集应生成不同 sample_id"
 
 
 @check("B1 / 显式 sample_id 重复提交被拒（不覆盖，防并发丢数据）")

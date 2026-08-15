@@ -137,7 +137,20 @@ if __name__ == "__main__":
     # N-LOG-1（2026-08-14）：统一 logging（生产 stdout 可采集），不再裸 print
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    os.environ.setdefault("A207_CALLER", "doctor_assistant")
+    # S-1（2026-08-15）：禁止静默默认医生身份——此前 setdefault 让未配置身份的
+    # 部署一跑即以最高权限 doctor_assistant 运行（P0-1：身份必须部署注入、模型不可
+    # 自证；迁移脚本同样适用）。改为显式要求：未注入 A207_CALLER 即 fail-closed
+    # 拒绝启动，并提示运维显式指定（迁移需全权限，缺省不可静默升级）。
+    if not os.environ.get("A207_CALLER"):
+        logger.error(
+            "[migrate] A207_CALLER 未设置——迁移脚本需要写入权限身份（通常为 "
+            "doctor_assistant），请显式注入后重试：\n"
+            "  A207_CALLER=doctor_assistant A207_ENV=production python -m "
+            "CKDNutri_clinical_data_mcp.migrate_tablestore\n"
+            "不静默默认医生身份（P0-1：身份必须由部署显式注入）")
+        raise SystemExit(2)
+    logger.warning("[migrate] 以 A207_CALLER=%s 身份执行迁移——确认该部署配置为最高权限身份",
+                   os.environ.get("A207_CALLER"))
     try:
         migrate()
     except Exception as exc:  # noqa: BLE001

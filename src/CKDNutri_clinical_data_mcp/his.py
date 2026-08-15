@@ -181,7 +181,15 @@ class _CrossProcessTokenLock:
             try:
                 import msvcrt  # Windows
 
-                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+                except OSError as exc:
+                    # D3（2026-08-15）：msvcrt LK_LOCK 阻塞重试约 10s 后抛 OSError——
+                    # 此前原样上传被 server 归 INTERNAL_ERROR（虚假 500，误导为数据
+                    # 错误）；转带语义的 RuntimeError（资源忙，提示重试）。
+                    raise RuntimeError(
+                        "跨进程令牌锁获取超时（另一签发/核验进程持锁超过 10s），"
+                        "通常是异常进程占用，请稍后重试或检查 .lock 文件") from exc
             except ImportError:
                 import fcntl  # POSIX
 
@@ -245,6 +253,38 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
         for pid, t in list(tokens.items()):
             if isinstance(t, dict) and _token_expired(t.get("expires_at"), now):
                 del tokens[pid]
+        # B1（2026-08-15）：签发限流——同一患儿 60s 内重复签发拒绝。此前无限制，
+        # prompt 注入/误调用可反复轮换令牌（家长端持有的旧令牌立即失效，被锁在
+        # 系统外最长 30 天）；签发是低频操作（医生主动签发），60s 冷却不伤正常流程。
+        prev = tokens.get(patient_id)
+        if isinstance(prev, dict):
+            prev_issued = prev.get("issued_at")
+            if prev_issued:
+                try:
+                    prev_dt = datetime.fromisoformat(str(prev_issued))
+                    if prev_dt.tzinfo is None:
+                        prev_dt = prev_dt.replace(tzinfo=timezone.utc)
+                    if (now - prev_dt).total_seconds() < 60:
+                        # B1（2026-08-15）：冷却期内**幂等返回现有令牌**（不轮换）——
+                        # 拒绝会让正常流程（重复签发/编排重试）报错卡死；返回现有令牌
+                        # 同时挫败 prompt 注入的"高频轮换锁死家长"意图（令牌不变，
+                        # 家长持有的旧令牌依然有效，无需重新下发）。
+                        _save_guardian_tokens(tokens)
+                        return {
+                            "ok": True,
+                            "data": {
+                                "patient_id": patient_id,
+                                "guardian_token": prev.get("token", ""),
+                                "issued_at": prev_issued,
+                                "expires_at": prev.get("expires_at"),
+                                "issued_by": prev.get("issued_by"),
+                                "idempotent_cooling": True,
+                                "note": f"该患儿令牌于 {prev_issued} 签发（<60s 冷却期），"
+                                        "幂等返回现有令牌（未轮换）；如需强制轮换请稍后再试",
+                            },
+                        }
+                except (ValueError, TypeError):
+                    pass  # issued_at 损坏不拦（令牌仍可正常轮换）
         tokens[patient_id] = {
             "token": token,
             "issued_at": now.isoformat(timespec="seconds"),
@@ -351,15 +391,20 @@ def _scope_of(caller: str) -> str:
 
 
 def _diagnosis_block(p: dict[str, Any]) -> dict[str, Any]:
+    # D4（2026-08-15）：硬索引 KeyError 防御——此前 p["ckd_stage"] 直取，种子数据
+    # 缺键（手工编辑/旧版 JSON）时 get_diagnosis 整段 500；.get 兜底为"未知"标记。
+    def _g(key: str, fallback: Any = None) -> Any:
+        return p.get(key, fallback)
+
     return {
-        "ckd_stage": p["ckd_stage"],
-        "ckd_stage_numeric": p["ckd_stage_numeric"],
-        "primary_disease": p["primary_disease"],
-        "dialysis": p["dialysis"],
-        "dialysis_mode": p["dialysis_mode"],
-        "dialysis_label": p["dialysis_label"],
-        "diagnosed_on": p["diagnosed_on"],
-        "stage_confirmed_by": p["stage_confirmed_by"],
+        "ckd_stage": _g("ckd_stage"),
+        "ckd_stage_numeric": _g("ckd_stage_numeric"),
+        "primary_disease": _g("primary_disease"),
+        "dialysis": _g("dialysis"),
+        "dialysis_mode": _g("dialysis_mode"),
+        "dialysis_label": _g("dialysis_label"),
+        "diagnosed_on": _g("diagnosed_on"),
+        "stage_confirmed_by": _g("stage_confirmed_by"),
     }
 
 

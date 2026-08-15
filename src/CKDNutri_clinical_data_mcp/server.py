@@ -45,6 +45,7 @@ def _invalid(exc):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")  # C2（2026-08-15）：生产 stdout 可采集
     # v3.0 启动自检（唯一后端 = Tablestore）：验证 OTS 连通性。
     # P1-9 修复（2026-08-13）：**自检失败 fail-fast 退出（非零码）**——此前仅打日志
     # 继续 mcp.run()，部署后"服务活着但每个工具 INTERNAL_ERROR"（比启动失败更难发现，

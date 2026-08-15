@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -92,10 +92,13 @@ class LabResultIn(_Strict):
     def _check_report_date(self):
         # BUG-67 后补（2026-08-12）：report_date 不得晚于当天——未来日期的化验结果
         # 无法来自真实检验，可能是伪造/时钟错误数据，写入会污染时间序列与趋势窗口。
-        if self.report_date > date.today():
+        # C2（2026-08-15）："当天"统一用 UTC 业务日（date.today() 本地 naive，
+        # 跨时区部署"未来日期"判断漂移——UTC+8 部署 00:00-08:00 会把本地今天的
+        # 报告误判为未来）。
+        if self.report_date > datetime.now(timezone.utc).date():
             raise ValueError(
                 f"report_date {self.report_date.isoformat()} 晚于当前日期 "
-                f"{date.today().isoformat()}，疑似未来数据，拒绝写入")
+                f"{datetime.now(timezone.utc).date().isoformat()}，疑似未来数据，拒绝写入")
         return self
 
 

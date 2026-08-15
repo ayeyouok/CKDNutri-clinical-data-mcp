@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import hashlib
 from typing import Any
 from uuid import uuid4
 
@@ -367,7 +368,16 @@ def upsert_lab_result(
     # 两个请求读到相同 existing → 相同 sample_id → append_lab_record 覆盖写静默丢一条。
     # 服务端改为生成碰撞免疫 ID（uuid4 hex8，UUID 前缀保留人读可辨性）；调用方显式
     # 传 sample_id 仍优先（去重责任上移的显式路径，由调用方保证唯一）。
-    sample_id = request.lab.sample_id or f"{request.patient_id}-U{uuid4().hex[:8]}"
+    # S-2（2026-08-15）：无显式 sample_id 时生成**确定性幂等 ID**——此前 uuid4 每次
+    # 调用不同，LIS/集成方超时重试同一化验（同日期同值）会落两行（条件写
+    # EXPECT_NOT_EXIST 因 id 不同拦不住）。幂等键 = patient + report_date + 归一化
+    # **指标名-值对**（值参与哈希：同值重试命中同 id 幂等返回；并发不同化验值
+    # 生成不同 id 不碰撞——若只哈希键名，并发同指标集不同值会 20 个全撞一个 id）。
+    if request.lab.sample_id:
+        sample_id = request.lab.sample_id
+    else:
+        id_key = f"{request.patient_id}|{request.lab.report_date.isoformat()}|{sorted(values.items())}"
+        sample_id = f"{request.patient_id}-S{hashlib.sha1(id_key.encode('utf-8')).hexdigest()[:8]}"
     record = {
         "patient_id": request.patient_id,
         "sample_id": sample_id,
@@ -378,7 +388,31 @@ def upsert_lab_result(
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
-    store_size = _repo().append_lab_record(record) if request.write_mode else None
+    try:
+        store_size = _repo().append_lab_record(record) if request.write_mode else None
+    except RuntimeError as exc:
+        # S-2：确定性 id 重试命中已存在（并发保护抛"sample_id 已存在"）→ 幂等成功，
+        # 不落两行、不把重试当错误卡死（LIS 重试收到成功即停止）。
+        if request.write_mode and not request.lab.sample_id and "已存在" in str(exc):
+            return {
+                "ok": True,
+                "recommend_reevaluate": True,
+                "data": {
+                    "patient_id": request.patient_id,
+                    "sample_id": sample_id,
+                    "report_date": record["report_date"],
+                    "persisted": True,
+                    "write_mode": True,
+                    "idempotent_hit": True,
+                    "note": "同日期同指标集的化验已存在（确定性 sample_id 幂等命中），"
+                            "未重复写入",
+                    "store_record_count": None,
+                    "analytes_written": sorted(values),
+                    "unit_conversions": conversions,
+                    "critical_count": len(critical_hits(values)),
+                },
+            }
+        raise
     hits = critical_hits(values)
     return {
         "ok": True,
