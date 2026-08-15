@@ -398,6 +398,10 @@ class TablestoreRepository(TablestoreBase):
         return sorted(panels.values(), key=lambda p: (p["report_date"], p["sample_id"]))
 
     def append_lab_record(self, record: dict[str, Any]) -> int:
+        # LOW-6（2026-08-15）：延迟导入 OTSClientError（与 storage.py 同模式，
+        # 避免模块顶部依赖 SDK；SDK 缺失时仅 Tablestore 后端 fail-fast）
+        from tablestore import OTSClientError
+
         sid = record.get("sample_id")
         if sid is None:
             raise ValueError("sample_id 必填")
@@ -417,14 +421,14 @@ class TablestoreRepository(TablestoreBase):
         try:
             self._put_row_not_exist(TABLE_LABS_STORE,
                                     self._pk_lab(record["patient_id"], sid), attrs)
-        except Exception as exc:
+        except OTSClientError as exc:
+            # LOW-6（2026-08-15）：直接捕获 SDK 异常类（此前 `except Exception` +
+            # `type(exc).__name__ == "OTSClientError"` 字符串比对——类名若变即失效）。
             # SDK 条件不满足抛 OTSClientError；统一转成带业务语义的 RuntimeError
             # （fail-closed：调用方看到的是"冲突"，而不是"写入成功但被覆盖"）。
-            if type(exc).__name__ == "OTSClientError":
-                raise RuntimeError(
-                    f"sample_id={sid} 已存在（并发冲突或重复提交），拒绝覆盖写入；"
-                    f"请更换 sample_id 或确认是否为重复请求") from exc
-            raise
+            raise RuntimeError(
+                f"sample_id={sid} 已存在（并发冲突或重复提交），拒绝覆盖写入；"
+                f"请更换 sample_id 或确认是否为重复请求") from exc
         # 返回写库总条数（与 store.append_record 语义一致）。
         # LOW-4 修复（2026-08-15）：此前全表 GetRange 后内存过滤该患者计数——labs_store
         # 是复合主键 (patient_id, sample_id)，改用主键前缀范围 GetRange 只扫该患者行

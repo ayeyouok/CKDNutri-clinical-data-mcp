@@ -46,8 +46,17 @@ os.environ["A207_GUARDIAN_TOKEN_DIR"] = str(TMP_DIR)
 
 
 # ---- 内存 Fake Tablestore 客户端（v3.0 单后端测试注入）----------------------
-class OTSClientError(Exception):
-    """模拟 tablestore.OTSClientError（类名与 SDK 一致，reposity 按 __name__ 识别）。"""
+# LOW-6（2026-08-15）：Fake 异常继承真实 SDK 类——repository 改为 `except OTSClientError`
+# 直接捕获（不再按 __name__ 字符串比对），若 Fake 仅继承 Exception 则捕获不到。
+# SDK 缺失（CI 精简环境）时回退 Exception，测试不硬依赖 SDK。
+try:
+    from tablestore import OTSClientError as _RealOTSClientError
+except ImportError:  # pragma: no cover - 仅无 SDK 环境
+    _RealOTSClientError = Exception
+
+
+class OTSClientError(_RealOTSClientError):
+    """模拟 tablestore.OTSClientError（继承真实 SDK 类，repository 可 isinstance 捕获）。"""
 
 
 class _FakeRow:
