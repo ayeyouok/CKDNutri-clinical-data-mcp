@@ -11,7 +11,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from a207_policy import CallerError
+from a207_policy import translate_error
 
 # BUG-55（2026-08-12）：函数拆分到 his.py 后，server 导入未同步——get_diagnosis /
 # get_patient_profile / get_nutrition_ceiling / list_patients / verify_guardian_binding
@@ -40,30 +40,8 @@ logger = logging.getLogger("CKDNutri-clinical-data-mcp")
 
 
 def _invalid(exc):
-    if isinstance(exc, CallerError):
-        # BUG-54（2026-08-12）：越权/身份未解析统一返回 FORBIDDEN 信封，不再向上抛 500。
-        # 2026-08-12（七审，care 同口径）：caller/action/reason 三重 or 保底。
-        logger.warning("临床数据服务鉴权拒绝: exc=%s", exc)
-        caller = getattr(exc, "caller", None) or "?"
-        action = getattr(exc, "action", None) or "access"
-        reason = getattr(exc, "reason", None) or str(exc) or "无明确原因"
-        return {"ok": False, "error": "FORBIDDEN",
-                "detail": f"caller={caller} 无权 {action}（{reason}）"}
-    # BUG-67 + B2（2026-08-12）：内部数据错误（store/his 损坏文件 RuntimeError、
-    # FileNotFoundError/OSError/JSONDecodeError）归 INTERNAL_ERROR 且 detail **脱敏**
-    # （不裸暴露 str(exc) 中的服务端路径），完整异常仅留服务端日志。
-    if isinstance(exc, (FileNotFoundError, OSError, json.JSONDecodeError, RuntimeError)):
-        logger.warning("临床数据服务内部数据错误: %s", exc)
-        return {"ok": False, "error": "INTERNAL_ERROR",
-                "detail": "内部数据错误（error_code=P1_DATA），详情见服务端日志"}
-    if isinstance(exc, ValueError):
-        # core/his 层业务/参数校验异常——detail 对调用方有明确语义，保留
-        logger.info("临床数据服务参数校验拦截: %s", exc)
-        return {"ok": False, "error": "INVALID_INPUT", "detail": str(exc)}
-    # 未知系统异常 = 内部 Code Bug——归 INTERNAL_ERROR（编排层不应重试/误判入参问题）
-    logger.error("临床数据服务未预期异常（内部 bug，error_code=P1_UNKNOWN）", exc_info=exc)
-    return {"ok": False, "error": "INTERNAL_ERROR",
-            "detail": "临床数据服务内部错误（error_code=P1_UNKNOWN），请查服务端日志"}
+    # B2 中心化（2026-08-15）：异常翻译收敛到 a207_policy.translate_error 单实现
+    return translate_error(exc, domain="P1", logger=logger)
 
 
 def main():

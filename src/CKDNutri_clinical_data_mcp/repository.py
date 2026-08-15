@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from a207_policy import atomic_write_json, resolve_state_path
+from a207_policy.storage import TablestoreBase, ensure_json_backend_allowed  # 2026-08-15：共享 Tablestore 基础设施
 
 from . import his as _his
 
@@ -234,7 +235,7 @@ class LocalJsonRepository:
         return [p["patient_id"] for p in _his.load_dataset().get("patients", [])]
 
 
-class TablestoreRepository:
+class TablestoreRepository(TablestoreBase):
     """阿里云表格存储后端（v3.0 起为默认后端）。
 
     设计要点：
@@ -247,39 +248,6 @@ class TablestoreRepository:
     - 连接参数缺失时 fail-fast 抛错，避免静默回退造成数据双写错乱。
     """
 
-    def __init__(self, client: Any | None = None) -> None:
-        """client 仅供测试注入内存 Fake（生产不传，走 A207_OTS_* 环境变量）。"""
-        if client is not None:
-            self._client = client
-            return
-        self.endpoint = os.environ.get(OTS_ENDPOINT_ENV)
-        self.instance = os.environ.get(OTS_INSTANCE_ENV)
-        self.ak_id = os.environ.get(OTS_AK_ID_ENV)
-        self.ak_secret = os.environ.get(OTS_AK_SECRET_ENV)
-        missing = [name for name, val in (
-            (OTS_ENDPOINT_ENV, self.endpoint),
-            (OTS_INSTANCE_ENV, self.instance),
-            (OTS_AK_ID_ENV, self.ak_id),
-            (OTS_AK_SECRET_ENV, self.ak_secret),
-        ) if not val]
-        if missing:
-            raise RuntimeError(
-                f"Tablestore 后端缺少连接参数：{', '.join(missing)}。"
-                f"请注入 A207_OTS_* 环境变量（A207_OTS_ENDPOINT / A207_OTS_INSTANCE_NAME / "
-                f"A207_OTS_ACCESS_KEY_ID / A207_OTS_ACCESS_KEY_SECRET）。")
-        self._client = None  # 惰性建连（_get_client() 首次调用时）
-
-    def _get_client(self):
-        """惰性建连（单例）：业务层每请求调用 get_repository()，避免重复握手。"""
-        if self._client is None:
-            import tablestore  # 延迟导入：JSON 后端无需依赖 SDK
-
-            self._client = tablestore.OTSClient(
-                self.endpoint, self.ak_id, self.ak_secret, self.instance)
-        return self._client
-
-    # ---- 基础读写 ----
-
     @staticmethod
     def _pk_patient(patient_id: str) -> list[tuple[str, str]]:
         return [("patient_id", patient_id)]
@@ -288,69 +256,6 @@ class TablestoreRepository:
     def _pk_lab(patient_id: str, sample_id: str) -> list[tuple[str, str]]:
         return [("patient_id", patient_id), ("sample_id", sample_id)]
 
-    def _get_row(self, table: str, pk: list[tuple[str, str]]) -> dict[str, Any] | None:
-        try:
-            _, row, _ = self._get_client().get_row(table, pk)
-        except Exception as exc:
-            # 五审（2026-08-13）🔴：存储层故障必须 fail-closed 抛错（→ INTERNAL_ERROR），
-            # **不得静默返回 None**——此前宽 except 把网络抖动/超时/鉴权失败全部吞掉，
-            # 上层 get_patient 等会误判"患者不存在"（NOT_FOUND），医疗数据可信度受损
-            # （医生在 Tablestore 抖动时看到"查无此人"而非"系统故障"）。
-            # 行不存在（row is None）是 SDK 的正常返回，不抛异常。
-            logger.error("Tablestore get_row 失败: table=%s pk=%s exc=%s", table, pk, exc)
-            raise RuntimeError(
-                f"Tablestore 读取失败（table={table}），详情见服务端日志") from exc
-        if row is None:
-            return None
-        # attribute_columns 为 (name, value, timestamp) 三元组，仅取 name/value
-        return {name: value for name, value, _ in row.attribute_columns}
-
-    def _put_row(self, table: str, pk: list[tuple[str, str]],
-                 attrs: dict[str, Any]) -> None:
-        from tablestore import Condition, Row, RowExistenceExpectation
-
-        condition = Condition(RowExistenceExpectation.IGNORE)
-        # SDK 不支持 None 属性值：过滤掉（缺列等价于 JSON 里缺键，读取侧容错）
-        clean = {k: v for k, v in attrs.items() if v is not None}
-        row = Row(pk, list(clean.items()))
-        self._get_client().put_row(table, row, condition)
-
-    def _put_row_not_exist(self, table: str, pk: list[tuple[str, str]],
-                           attrs: dict[str, Any]) -> None:
-        """条件写：主键**不得已存在**（EXPECT_NOT_EXIST），已存在抛 OTSClientError。
-
-        B1 修复（2026-08-13）：append_lab_record 不再覆盖写——若调用方显式传入的
-        sample_id 与既有行撞主键，必须报错暴露冲突，绝不静默覆盖（丢数据）。
-        服务端生成的 uuid sample_id 理论上不撞，但此条件写是最后一道防线。
-        """
-        from tablestore import Condition, Row, RowExistenceExpectation
-
-        condition = Condition(RowExistenceExpectation.EXPECT_NOT_EXIST)
-        clean = {k: v for k, v in attrs.items() if v is not None}
-        row = Row(pk, list(clean.items()))
-        self._get_client().put_row(table, row, condition)
-
-    def _range_all(self, table: str) -> list[dict[str, Any]]:
-        """全表 GetRange（主键升序）。返回 [{primary_key_dict, attrs_dict}]。"""
-        from tablestore import INF_MIN, INF_MAX, RowExistenceExpectation
-
-        start = [("patient_id", INF_MIN), ("sample_id", INF_MIN)] \
-            if table in (TABLE_LABS, TABLE_LABS_STORE) else [("patient_id", INF_MIN)]
-        end = [("patient_id", INF_MAX), ("sample_id", INF_MAX)] \
-            if table in (TABLE_LABS, TABLE_LABS_STORE) else [("patient_id", INF_MAX)]
-        rows: list[dict[str, Any]] = []
-        next_start = start
-        while next_start is not None:
-            consumed, next_start, row_list, _ = self._get_client().get_range(
-                table, "FORWARD", next_start, end, limit=200)
-            for row in row_list:  # 6.4.8 返回 Row 对象（.primary_key/.attribute_columns）
-                pk_dict = {}
-                for k, v in row.primary_key:
-                    pk_dict[k] = v.decode() if isinstance(v, bytes) else v
-                # attribute_columns 为 (name, value, timestamp) 三元组，仅取 name/value
-                attrs_dict = {name: value for name, value, _ in row.attribute_columns}
-                rows.append({"pk": pk_dict, "attrs": attrs_dict})
-        return rows
 
     # ---- 数据集元数据 ----
 
@@ -423,7 +328,7 @@ class TablestoreRepository:
         from .his import _match  # 复用 his 的筛选谓词（单一事实源）
 
         criteria = criteria or {}
-        rows = self._range_all(TABLE_PATIENTS)
+        rows = self._range_all(TABLE_PATIENTS, ["patient_id"])
         matched = []
         for item in rows:
             patient = self._deserialize_patient(item["attrs"])
@@ -442,7 +347,7 @@ class TablestoreRepository:
         return matched
 
     def all_patient_ids(self) -> list[str]:
-        rows = self._range_all(TABLE_PATIENTS)
+        rows = self._range_all(TABLE_PATIENTS, ["patient_id"])
         return [item["pk"]["patient_id"] for item in rows]
 
     # ---- LIS 化验数据 ----
@@ -456,7 +361,7 @@ class TablestoreRepository:
         """
         panels: dict[str, dict[str, Any]] = {}
         for table in (TABLE_LABS, TABLE_LABS_STORE):
-            for item in self._range_all(table):
+            for item in self._range_all(table, ["patient_id", "sample_id"]):
                 if item["pk"].get("patient_id") != patient_id:
                     continue
                 attrs = dict(item["attrs"])
@@ -521,46 +426,22 @@ class TablestoreRepository:
                     f"请更换 sample_id 或确认是否为重复请求") from exc
             raise
         # 返回写库总条数（与 store.append_record 语义一致）
-        return len([i for i in self._range_all(TABLE_LABS_STORE)
+        return len([i for i in self._range_all(TABLE_LABS_STORE, ["patient_id", "sample_id"])
                     if i["pk"].get("patient_id") == record["patient_id"]])
 
     def known_lis_patient_ids(self) -> list[str]:
-        rows = self._range_all(TABLE_LABS)
+        rows = self._range_all(TABLE_LABS, ["patient_id", "sample_id"])
         return sorted({item["pk"]["patient_id"] for item in rows})
 
 
 def ensure_tablestore_tables() -> None:
-    """创建/校验 Tablestore 表（幂等，仅建缺失表）。
+    """创建/校验 Tablestore 表（幂等，仅建缺失表；2026-08-15 收敛到 storage.ensure_tables）。"""
+    TablestoreBase().ensure_tables({
+        TABLE_PATIENTS: [("patient_id", "STRING")],
+        TABLE_LABS: [("patient_id", "STRING"), ("sample_id", "STRING")],
+        TABLE_LABS_STORE: [("patient_id", "STRING"), ("sample_id", "STRING")],
+    })
 
-    需先设置 A207_OTS_* 环境变量。36 患儿量级暂不建二级索引
-    （list_patients 全表 GetRange 内存筛选足够）；数据量增长后可为
-    patients 表 ckd_stage/age_band 建二级索引。
-    """
-    from tablestore import (CapacityUnit, Condition, OTSClient,
-                            ReservedThroughput, RowExistenceExpectation,
-                            TableMeta, TableOptions)
-
-    endpoint = os.environ[OTS_ENDPOINT_ENV]
-    instance = os.environ[OTS_INSTANCE_ENV]
-    ak = os.environ[OTS_AK_ID_ENV]
-    sk = os.environ[OTS_AK_SECRET_ENV]
-    client = OTSClient(endpoint, ak, sk, instance)
-    existing = set(client.list_table())
-
-    def _create(table_name: str, pk_schema: list[tuple[str, str]]) -> None:
-        if table_name in existing:
-            return
-        meta = TableMeta(table_name, pk_schema)
-        options = TableOptions(time_to_live=-1, max_version=1)
-        throughput = ReservedThroughput(capacity_unit=CapacityUnit(0, 0))  # 按量计费
-        client.create_table(meta, options, throughput)
-        logger.info("[ensure] 已创建表 %s", table_name)
-
-    _create(TABLE_PATIENTS, [("patient_id", "STRING")])
-    _create(TABLE_LABS, [("patient_id", "STRING"), ("sample_id", "STRING")])
-    _create(TABLE_LABS_STORE, [("patient_id", "STRING"), ("sample_id", "STRING")])
-    logger.info("[ensure] Tablestore 表就绪：%s",
-                sorted(existing | {TABLE_PATIENTS, TABLE_LABS, TABLE_LABS_STORE}))
 
 
 def get_repository() -> ClinicalDataRepository:
@@ -569,6 +450,9 @@ def get_repository() -> ClinicalDataRepository:
     C3 修复（2026-08-14）：实例按 backend 缓存（double-checked locking）——此前每请求
     新建 TablestoreRepository（每请求新建 OTSClient 连接池），注释"单例"失实。"""
     backend = os.environ.get(STORAGE_BACKEND_ENV, "tablestore").strip().lower()
+    if backend == "json":
+        # 生产护栏（2026-08-15）：json 后端仅限显式确认（A207_ACCEPT_DEV_STORAGE=1）
+        ensure_json_backend_allowed()  # 未确认即抛 RuntimeError（fail-closed）
     repo = _REPO_CACHE.get(backend)
     if repo is None:
         with _REPO_LOCK:
