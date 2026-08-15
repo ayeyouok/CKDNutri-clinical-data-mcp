@@ -84,8 +84,12 @@ def _guard_access(tool: str, *, write: bool = False) -> dict[str, Any] | None:
 # 必剥集合 = 全系统医生专有叶子字段(CLINICIAN_ONLY_FIELDS) ∪ P1 专有聚合块(P1_PARENT_HIDDEN_FIELDS)。
 # nutrition_ceiling 是 P1 对家长的刻意放行（家长须知晓医生设定的摄入上限），从必剥集合剔除。
 _PARENT_HIDDEN_FIELDS = (CLINICIAN_ONLY_FIELDS | P1_PARENT_HIDDEN_FIELDS) - {"nutrition_ceiling"}
-# 家长受限视图对外声明"被隐藏"的字段（结构块 + 与之相关的两个叶子级敏感键）。
-_PARENT_WITHHELD_DOC = P1_PARENT_HIDDEN_FIELDS | {"z_score_height", "stage_confirmed_by"}
+# P1 一般（2026-08-15）：withheld 声明与实际剥离集合对齐——此前声明
+# P1_PARENT_HIDDEN_FIELDS | {"z_score_height","stage_confirmed_by"} 漏掉
+# CLINICIAN_ONLY_FIELDS 叶子、且可能含已被剔除放行的 nutrition_ceiling
+# （声明"被隐藏"但实际对家长可见），声明与剥离行为漂移。
+# 现直接引用实际剥离集合 _PARENT_HIDDEN_FIELDS（单一事实源，杜绝未来再漂移）。
+_PARENT_WITHHELD_DOC = _PARENT_HIDDEN_FIELDS
 
 
 def _strip_parent_sensitive(obj: Any) -> Any:
@@ -235,6 +239,12 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
         # 多实例部署的一致性靠 A207_GUARDIAN_TOKEN_DIR 指向共享持久目录 + 文件锁保证。
         tokens = _load_guardian_tokens()
         now = datetime.now(timezone.utc)
+        # P1 一般（2026-08-15）：签发时顺带清理过期令牌——过期项核验已 fail-closed
+        # 拒绝（不会误放行），但只增不删会无限累积（30 天 TTL，长期运行文件膨胀）。
+        # 持锁写回路径清理最安全（无并发读写竞争），写回即自然移除过期项。
+        for pid, t in list(tokens.items()):
+            if isinstance(t, dict) and _token_expired(t.get("expires_at"), now):
+                del tokens[pid]
         tokens[patient_id] = {
             "token": token,
             "issued_at": now.isoformat(timespec="seconds"),
@@ -315,6 +325,21 @@ def _token_matches(patient_id: str, guardian_token: str) -> bool:
     副本漂移——此前 P2 各维护一份副本且缺过期校验，令牌轮换后旧令牌在 P2 仍有效。
     """
     return verify_guardian_token(patient_id, guardian_token)
+
+
+def _token_expired(expires_at: Any, now: datetime) -> bool:
+    """判定令牌是否过期（与 a207_policy.gate.verify_guardian_token 同口径）。
+
+    P1 一般（2026-08-15）：签发路径清理过期令牌用——naive/aware 兼容、
+    无法解析一律视为过期（fail-closed）。
+    """
+    try:
+        parsed = datetime.fromisoformat(str(expires_at or ""))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return now > parsed
+    except (ValueError, TypeError):
+        return True
 
 
 def _scope_of(caller: str) -> str:
@@ -489,7 +514,10 @@ def _validate_filter(criteria: dict[str, Any]) -> str | None:
         if k in ("age_band", "ckd_stage", "dialysis", "sex", "primary_disease"):
             items = v if isinstance(v, (list, tuple, set)) else [v]
             for it in items:
-                if isinstance(it, (dict, list, tuple, set)):
+                # P1 一般（2026-08-15）：枚举键仅接受字符串——此前只拦不可哈希元素，
+                # int/float（如 sex=1、age_band=123）放行后 _match 永不命中，静默
+                # 返回空队列，调用方误以为"该枚举无匹配患者"（实际是查询写错）。
+                if not isinstance(it, str):
                     return f"{k} 的值必须为字符串或字符串列表，收到 {it!r}"
         elif k == "has_allergies":
             if isinstance(v, str):
@@ -506,6 +534,13 @@ def _validate_filter(criteria: dict[str, Any]) -> str | None:
                 return f"{k} 必须是数字，收到 {v!r}"
             if not math.isfinite(val):
                 return f"{k} 必须是有限数值，收到 {v!r}"
+    # P1 一般（2026-08-15）：min>max 年龄不校验会静默返回空队列（查询写错被当成
+    # "无匹配患者"）——交叉校验两界大小。
+    if "min_age_years" in criteria and "max_age_years" in criteria:
+        lo = float(criteria["min_age_years"])
+        hi = float(criteria["max_age_years"])
+        if lo > hi:
+            return f"min_age_years（{lo}）不能大于 max_age_years（{hi}）"
     return None
 
 

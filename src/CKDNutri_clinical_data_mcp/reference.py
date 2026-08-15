@@ -33,18 +33,26 @@ ANALYTES: dict[str, dict[str, str]] = {
 
 # --- 年龄分带 ---------------------------------------------------------------
 
+# P1-1（2026-08-15）：双闭区间留缝（3.999,4.0）/(6.999,7.0)/(12.999,13.0)——真实年龄
+# 如 3.9996 落缝被兜底成 adolescent，套用青少年参考区间致化验状态静默错判。
+# 改**半开区间** [low, high)：上界即下一带下界，全实数轴无缝隙。
 AGE_BANDS: tuple[tuple[float, float, str], ...] = (
-    (0.0, 3.999, "toddler"),
-    (4.0, 6.999, "preschool"),
-    (7.0, 12.999, "school"),
+    (0.0, 4.0, "toddler"),
+    (4.0, 7.0, "preschool"),
+    (7.0, 13.0, "school"),
     (13.0, 99.0, "adolescent"),
 )
 
 
 def age_band(age_years: float) -> str:
-    """把年龄映射到儿科参考区间分带。"""
+    """把年龄映射到儿科参考区间分带（半开区间，全轴无缝隙）。
+
+    P1-1 修复（2026-08-15）：此前 `low <= age <= high` 双闭区间在整岁边界
+    (3.999,4.0)/(6.999,7.0)/(12.999,13.0) 留缝，落缝年龄兜底 adolescent——
+    真实年龄（如 3.9996 岁）被套青少年参考区间，化验状态静默错判。
+    """
     for low, high, name in AGE_BANDS:
-        if low <= age_years <= high:
+        if low <= age_years < high:
             return name
     return "adolescent"
 
