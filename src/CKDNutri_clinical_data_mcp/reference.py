@@ -148,7 +148,8 @@ CRITICAL_RULES: tuple[tuple[str, str, float, str, str], ...] = (
     ("k_mmol_L", "<", 2.8, "CRIT-K-LOW", "血钾危急降低"),
     ("hb_g_L", "<", 60.0, "CRIT-HB-LOW", "重度贫血，需评估输血指征"),
     ("ca_mmol_L", "<", 1.60, "CRIT-CA-LOW", "血钙危急降低，有抽搐风险"),
-    ("ca_mmol_L", ">", 3.50, "CRIT-CA-HIGH", "血钙危急升高"),
+    # M-4（2026-08-15）：高钙危急 3.50→3.25——此前偏松漏报。权威：AAP 1991 全美儿科医院调查高钙危急均值 3.17 mmol/L；NSW Health 儿科校正钙 ≥3.0 即需紧急处理。取 3.25（常规临界，3.25-3.5 区间此前漏报）。
+    ("ca_mmol_L", ">", 3.25, "CRIT-CA-HIGH", "血钙危急升高"),
     ("na_mmol_L", "<", 120.0, "CRIT-NA-LOW", "血钠危急降低"),
     ("na_mmol_L", ">", 160.0, "CRIT-NA-HIGH", "血钠危急升高"),
     ("p_mmol_L", ">", 3.20, "CRIT-P-HIGH", "血磷危急升高"),

@@ -43,8 +43,10 @@ READ_FULL = LIS_READ_FULL
 READ_LIMITED = LIS_READ_LIMITED
 CRITICAL_CHANNEL = LIS_CRITICAL_CHANNEL
 
-REEVALUATE_HINT = "a207-risk-rules-mcp.evaluate_risk_rules"
-NOTIFY_HINT = "a207-notify-mcp.notify_critical_value"
+# F-3（2026-08-15）：next_action 原指向"a207-risk-rules-mcp.evaluate_risk_rules"——该工具在 P4 工具面不存在（P4 实际暴露 assess_clinical_status_tool），LLM 依提示调用即 ToolNotFound（幽灵指引）。改为真实工具名（编排层可据此编排 DAG）。
+REEVALUATE_HINT = "CKDNutri-assessment-mcp.assess_clinical_status_tool"
+# F-3：原指向"a207-notify-mcp.notify_critical_value"——P3 工具面实际为 trigger_event_notification_tool（事件驱动通知），改为真实工具名。
+NOTIFY_HINT = "CKDNutri-care-mcp.trigger_event_notification_tool"
 
 
 # --- 工具 1：get_labs -------------------------------------------------------

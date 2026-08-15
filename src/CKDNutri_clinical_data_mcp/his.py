@@ -418,6 +418,12 @@ def _demographics_block(p: dict[str, Any], scope: str) -> dict[str, Any]:
         "weight_kg": p["weight_kg"],
         "bmi": p["bmi"],
         "edema": p["edema"],
+        # F-6（2026-08-15）：报告"基本信息"渲染 ckd_stage（content 契约要求
+        # demographics 含 ckd_stage/dialysis_mode）——此前 ckd_stage 仅在 diagnosis
+        # 块，报告层取 demographics 渲染为 None。分期非敏感（diagnosis 块家长可见），
+        # 补到 demographics 无泄露风险。
+        "ckd_stage": p.get("ckd_stage"),
+        "ckd_stage_numeric": p.get("ckd_stage_numeric"),
     }
     if scope != "limited_parent":
         block["bsa_m2"] = p["bsa_m2"]

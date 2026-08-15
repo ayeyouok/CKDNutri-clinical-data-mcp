@@ -36,7 +36,7 @@ def _upsert_ok():
     data = res["data"]
     assert data["persisted"] is True
     assert data["store_record_count"] >= 1
-    assert data["next_action"] == "a207-risk-rules-mcp.evaluate_risk_rules"
+    assert data["next_action"] == "CKDNutri-assessment-mcp.assess_clinical_status_tool"  # F-3：真实工具名
     # v3.0：写库落在 Tablestore labs_store（Fake 客户端），不再有 JSON 文件
     records = fake_labs_store_records()
     assert records, "Tablestore labs_store 无写入"
@@ -108,7 +108,7 @@ def _upsert_critical():
         )
     assert res["ok"] is True
     assert res["data"]["critical_count"] >= 1, res["data"]
-    assert res["data"]["notify_action"] == "a207-notify-mcp.notify_critical_value"
+    assert res["data"]["notify_action"] == "CKDNutri-care-mcp.trigger_event_notification_tool"  # F-3：真实工具名
 
 
 @check("upsert / caller=parent_assistant 返回 FORBIDDEN")

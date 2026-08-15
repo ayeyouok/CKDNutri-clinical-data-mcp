@@ -164,7 +164,7 @@ def _crit_k():
     assert "CRIT-K-HIGH" in rules, rules
     hit = next(i for i in res["data"]["items"] if i["rule"] == "CRIT-K-HIGH")
     assert hit["value"] > 6.5 and hit["unit"] == "mmol/L", hit
-    assert res["data"]["next_action"] == "a207-notify-mcp.notify_critical_value"
+    assert res["data"]["next_action"] == "CKDNutri-care-mcp.trigger_event_notification_tool"  # F-3：真实工具名
 
 
 @check("get_critical_values 命中重度贫血 P0031 与低钙 P0023")
