@@ -425,9 +425,13 @@ class TablestoreRepository(TablestoreBase):
                     f"sample_id={sid} 已存在（并发冲突或重复提交），拒绝覆盖写入；"
                     f"请更换 sample_id 或确认是否为重复请求") from exc
             raise
-        # 返回写库总条数（与 store.append_record 语义一致）
-        return len([i for i in self._range_all(TABLE_LABS_STORE, ["patient_id", "sample_id"])
-                    if i["pk"].get("patient_id") == record["patient_id"]])
+        # 返回写库总条数（与 store.append_record 语义一致）。
+        # LOW-4 修复（2026-08-15）：此前全表 GetRange 后内存过滤该患者计数——labs_store
+        # 是复合主键 (patient_id, sample_id)，改用主键前缀范围 GetRange 只扫该患者行
+        # （医院级数千患者时单次写入不再全表扫描，性能/内存与患者总数解耦）。
+        rows = self._range_all(TABLE_LABS_STORE, ["patient_id", "sample_id"],
+                               prefix={"patient_id": record["patient_id"]})
+        return len(rows)
 
     def known_lis_patient_ids(self) -> list[str]:
         rows = self._range_all(TABLE_LABS, ["patient_id", "sample_id"])

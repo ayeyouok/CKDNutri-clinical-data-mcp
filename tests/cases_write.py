@@ -378,3 +378,28 @@ def _b1_concurrent_upsert():
              if p.get("source") == "upsert" and p["values"].get("k_mmol_L") is not None}
     missing = want_k - got_k
     assert not missing, f"并发写入有 {len(missing)} 条被覆盖丢失: {sorted(missing)}"
+
+
+@check("LOW-4 / append_lab_record 计数用主键前缀范围（不全表扫其他患者）")
+def _low4_append_prefix_scan():
+    """LOW-4（2026-08-15）：写库计数改前缀 GetRange——_range_all 必须带
+    prefix={"patient_id": 该患者}，只扫该患者行（此前全表 GetRange 内存过滤）。"""
+    from unittest import mock
+
+    import harness
+
+    calls: list[tuple] = []
+
+    def spy(table, pk_cols, prefix=None):
+        calls.append((table, pk_cols, prefix))
+        return []
+
+    rec = {"patient_id": "P0013", "sample_id": "low4-prefix-1",
+           "report_date": _TODAY, "values": {"k_mmol_L": 4.5}}
+    with mock.patch.object(harness.FAKE_REPO, "_range_all", spy):
+        n = harness.FAKE_REPO.append_lab_record(rec)
+    assert calls, "append_lab_record 未走 _range_all 计数"
+    table, pk_cols, prefix = calls[-1]
+    assert prefix == {"patient_id": "P0013"}, (table, pk_cols, prefix)
+    assert pk_cols == ["patient_id", "sample_id"], pk_cols
+    assert n == 0, n  # spy 返回空 → 计数 0（行为验证：返回值来自前缀结果）
