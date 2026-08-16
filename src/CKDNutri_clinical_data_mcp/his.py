@@ -477,9 +477,12 @@ def get_patient_profile(patient_id: str,
         # BUG-31：删除退役角色 limited_nutritionist 分支（nutritionist 已退役）
         data = _strip_parent_sensitive(data)
         data["withheld"] = sorted(_PARENT_WITHHELD_DOC)
+        # M-2（2026-08-16，十一审）：withheld_reason 不得泄露内部符号名——此前
+        # 硬编码 "CLINICIAN_ONLY_FIELDS + P1_PARENT_HIDDEN_FIELDS"（策略常量名，
+        # 家长上下文暴露架构语言）。改中性描述，脱敏依据保留在服务端注释。
         data["withheld_reason"] = (
-            "家长受限视图仅含诊断、过敏与医生设定上限；脱敏基准见 a207_policy "
-            "CLINICIAN_ONLY_FIELDS + P1_PARENT_HIDDEN_FIELDS")
+            "家长受限视图仅含诊断、过敏与医生设定上限；"
+            "其余判读/内部字段按临床权限策略统一脱敏")
     return {"ok": True, "data": data}
 
 
@@ -649,7 +652,15 @@ def list_patients(filter: dict[str, Any] | None = None,
     repo = _repo()
     rows = repo.list_patients(criteria)
     # 分页前显式排序（Tablestore GetRange 天然按主键序，LocalJson 需排序保证跨页稳定）
-    rows = sorted(rows, key=lambda r: r["patient_id"])
+    # M-6（2026-08-16，十一审）：patient_id 字符串排序潜伏倒置——'P10000' < 'P9999'
+    # （'1'<'9'），当前 4 位补零未触发（P0999 < P1000 巧合正确），一旦超过 9999 即倒置。
+    # 按数字部分整数排序（P9999 < P10000），保留字符串形态展示。
+    def _pid_key(r):
+        try:
+            return int(str(r["patient_id"]).lstrip("Pp") or 0)
+        except (ValueError, AttributeError):
+            return 0
+    rows = sorted(rows, key=_pid_key)
     total = len(rows)
     start = (page - 1) * page_size
     page_rows = rows[start:start + page_size]
