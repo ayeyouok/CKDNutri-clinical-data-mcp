@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 from .reference import (
@@ -41,7 +41,9 @@ def _eff_age_at(age: float, report_date: Any) -> tuple[float, date | None, str |
         rd_date = date.fromisoformat(str(report_date)[:10])
     except ValueError:
         return age, None, None
-    today = date.today()
+    # L（2026-08-16，第七轮审查）：未来日期判断统一 UTC 业务日（date.today() 本地
+    # naive 与全局 UTC 口径脱节，跨时区部署漂移）。
+    today = datetime.now(timezone.utc).date()
     if rd_date > today:
         return age, rd_date, "future"
     yrs_since = (today - rd_date).days / 365.25

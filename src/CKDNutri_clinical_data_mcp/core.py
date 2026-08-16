@@ -167,7 +167,10 @@ def get_critical_values(
                 "sample_id": latest["sample_id"],
                 "critical_count": len(hits),
                 "items": hits,
-                "next_action": NOTIFY_HINT if hits else None,
+                # M1（2026-08-16，第七轮审查）：家长分支 next_action 恒 None——此前
+                # 下发 NOTIFY_HINT 与注释"家长不落通知链路"矛盾，LLM 依提示可能让家长
+                # 重复触发通知（通知是 doctor/risk_warning 的职责）。
+                "next_action": None,
                 "note": "危急值明细对家长可见（知情权）；请及时联系主管医生处置。",
             },
         }
@@ -183,6 +186,8 @@ def get_critical_values(
             "report_date": latest["report_date"],
             "sample_id": latest["sample_id"],
             "scan_scope": "latest_panel",
+            # L（2026-08-16）：医生分支补 data_scope（家长分支已有 parent_full，信封对称）
+            "data_scope": "full",
             "critical_count": len(hits),
             "items": hits,
             "prior_panels_with_critical": history,
@@ -413,6 +418,16 @@ def upsert_lab_result(
                     "unit_conversions": conversions,
                     "critical_count": len(critical_hits(values)),
                 },
+            }
+        # L（2026-08-16，第七轮审查）：**显式 sample_id** 冲突 → CONFLICT 信封（此前
+        # RuntimeError 冒泡到 server 被 translate_error 归 INTERNAL_ERROR——调用方
+        # 无法区分"服务端内部错误"与"业务冲突"；冲突是预期业务语义，应显式提示换 id）。
+        if request.write_mode and "已存在" in str(exc):
+            return {
+                "ok": False,
+                "error": "CONFLICT",
+                "detail": f"sample_id={sample_id} 已存在（并发冲突或重复提交），"
+                          "拒绝覆盖写入；请更换 sample_id 或确认是否为重复请求",
             }
         raise
     hits = critical_hits(values)

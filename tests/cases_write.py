@@ -321,13 +321,15 @@ def _b1_dup_sample_id_rejected():
     assert res["ok"] is True, res
     # 同 sample_id 再次写入：条件写（EXPECT_NOT_EXIST）必须失败，不得覆盖
     before = fake_labs_store_count()
+    # L（2026-08-16，第七轮审查）：显式 sample_id 冲突返回 **CONFLICT 信封**（业务
+    # 冲突语义化，不再抛 RuntimeError 冒泡 INTERNAL_ERROR）——测试同时接受两者。
     try:
         with as_caller("doctor_assistant"):
-            core.upsert_lab_result(
+            res2 = core.upsert_lab_result(
                 "P0013",
                 {"report_date": _TODAY, "k_mmol_L": 9.9, "sample_id": "P0013-U-test1"},
             )
-        raise AssertionError("重复 sample_id 未被拒绝（静默覆盖=丢数据）")
+        assert res2["ok"] is False and res2["error"] == "CONFLICT", res2
     except RuntimeError as exc:
         assert "已存在" in str(exc), exc
     assert fake_labs_store_count() == before, "重复提交产生了写入副作用"

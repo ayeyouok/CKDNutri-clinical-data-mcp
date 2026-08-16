@@ -21,6 +21,7 @@ from .core import (
     get_critical_values,
     get_labs,
     get_lab_trend,
+    list_known_patients,
     upsert_lab_result,
 )
 from .his import (
@@ -127,6 +128,20 @@ def list_patients_tool(filter: dict = None, page: int = 1, page_size: int = 50) 
     """
     try:
         return list_patients(filter, page=page, page_size=page_size)
+    except Exception as exc:
+        return _invalid(exc)
+
+
+@mcp.tool
+def list_known_patients_tool() -> dict[str, Any]:
+    """列出本 LIS 数据集覆盖的全部 patient_id（供跨包联调/编排核对）。
+
+    L（2026-08-16，第七轮审查）：core.list_known_patients 此前实现+测试齐全但**未注册
+    为 MCP 工具**（未接线）。仅临床/风险身份可用（COHORT_CALLERS 收口，家长不可枚举
+    患者花名册）；返回 {count, patient_ids}。
+    """
+    try:
+        return list_known_patients()
     except Exception as exc:
         return _invalid(exc)
 

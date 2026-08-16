@@ -184,13 +184,42 @@ def build_food_diary(rng: Random, band: str, allergen_foods: set[str],
     return entries
 
 
+# M2（2026-08-16，第七轮审查）：LAB_RANGES 用**短名**（potassium/hemoglobin...），
+# ANALYTES 用**契约长键**（k_mmol_L/hb_g_L...，位于主包 reference）——worse 方向
+# 经此映射查主包 ANALYTES 单一事实源（data.reference 无 ANALYTES）。
+_SHORT_TO_ANALYTE: dict[str, str] = {
+    "potassium": "k_mmol_L", "phosphorus": "p_mmol_L", "calcium": "ca_mmol_L",
+    "albumin": "albumin_g_L", "hemoglobin": "hb_g_L", "pth": "ipth_pg_mL",
+    "bun": "bun_mmol_L", "bicarbonate": "hco3_mmol_L", "uric_acid": "ua_umol_L",
+}
+
+# 延迟导入主包 ANALYTES（避免 data 子模块与主包循环；_lab_value 内 lazy）
+_MAIN_ANALYTES: dict | None = None
+
+
+def _worse_of(short_name: str) -> str:
+    """短名 → 主包 ANALYTES 的 worse 方向（high/low/both），查不到默认 high。"""
+    global _MAIN_ANALYTES
+    if _MAIN_ANALYTES is None:
+        from CKDNutri_clinical_data_mcp.reference import ANALYTES as _A
+        _MAIN_ANALYTES = _A
+    return _MAIN_ANALYTES.get(_SHORT_TO_ANALYTE.get(short_name, ""), {}).get("worse", "high")
+
+
 def _lab_value(rng: Random, stage: str, dialysis: str, analyte: str,
                drift: float, nd: int) -> float:
     lo, hi = ref.LAB_RANGES[stage][analyte]
     shift = ref.DIALYSIS_LAB_SHIFT.get(dialysis, {}).get(analyte, 0.0)
     span = hi - lo
-    # drift<1 表示更早的一次采样，指标整体更靠近区间下沿（病情当时更轻）
-    value = rng.uniform(lo, hi) + shift - span * (1.0 - drift) * 0.55
+    # M2（2026-08-16，第七轮审查）：drift 方向按 ANALYTES.worse 修正——此前固定
+    # "drift 大（病情进展）→ 值偏高"，对 worse="low" 的指标（Hb/白蛋白/前白蛋白/
+    # hco3/egfr/vitD——**越低越坏**）方向反转，生成"病情进展但指标虚假改善"的
+    # 时间序列（mock 数据误导演示/测试）。按 worse 取方向：
+    #   high → drift 大 → 值高（恶化）；low → drift 大 → 值低（恶化）；
+    #   both → 不随 drift 偏（高/低都坏，方向无歧义）。
+    worse = _worse_of(analyte)
+    direction = 1.0 if worse == "low" else (-1.0 if worse == "high" else 0.0)
+    value = rng.uniform(lo, hi) + shift + direction * span * (1.0 - drift) * 0.55
     return round(max(value, lo * 0.75), nd)
 
 
