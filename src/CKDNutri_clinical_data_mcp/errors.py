@@ -32,8 +32,8 @@ def invalid(exc: ValidationError | ValueError) -> dict[str, Any]:
     if isinstance(exc, ValidationError):
         first = exc.errors()[0]
         loc = ".".join(str(x) for x in first.get("loc", ())) or "input"
-        return fail("INVALID_ARGUMENT", f"{loc}: {first.get('msg')}")
-    return fail("INVALID_ARGUMENT", str(exc))
+        return fail("INVALID_INPUT", f"{loc}: {first.get('msg')}")
+    return fail("INVALID_INPUT", str(exc))
 
 
 def patient_context(patient: dict[str, Any]) -> dict[str, Any]:

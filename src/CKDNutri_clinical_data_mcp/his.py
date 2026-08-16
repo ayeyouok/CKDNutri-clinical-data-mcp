@@ -235,7 +235,7 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
     try:
         patient_id = validate_patient_id(patient_id)
     except ValueError as exc:
-        return _err("INVALID_ARGUMENT", str(exc))
+        return _err("INVALID_INPUT", str(exc))
     if _repo().get_patient(patient_id) is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
     token = secrets.token_urlsafe(GUARDIAN_TOKEN_BYTES)
@@ -442,7 +442,7 @@ def get_patient_profile(patient_id: str,
     try:
         patient_id = validate_patient_id(patient_id)
     except ValueError as exc:
-        return _err("INVALID_ARGUMENT", str(exc))
+        return _err("INVALID_INPUT", str(exc))
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_patient_profile")
     if denied:
         return denied
@@ -494,7 +494,7 @@ def get_diagnosis(patient_id: str,
     try:
         patient_id = validate_patient_id(patient_id)
     except ValueError as exc:
-        return _err("INVALID_ARGUMENT", str(exc))
+        return _err("INVALID_INPUT", str(exc))
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_diagnosis")
     if denied:
         return denied
@@ -535,9 +535,9 @@ def verify_guardian_binding(patient_id: str, guardian_token: str) -> dict[str, A
     try:
         patient_id = validate_patient_id(patient_id)
     except ValueError as exc:
-        return _err("INVALID_ARGUMENT", str(exc))
+        return _err("INVALID_INPUT", str(exc))
     if not isinstance(guardian_token, str) or not guardian_token:
-        return _err("INVALID_ARGUMENT", "guardian_token 不能为空")
+        return _err("INVALID_INPUT", "guardian_token 不能为空")
     p = _repo().get_patient(patient_id)
     bound = p is not None and _token_matches(patient_id, guardian_token)
     return {
@@ -681,7 +681,7 @@ def get_nutrition_ceiling(patient_id: str,
     try:
         patient_id = validate_patient_id(patient_id)
     except ValueError as exc:
-        return _err("INVALID_ARGUMENT", str(exc))
+        return _err("INVALID_INPUT", str(exc))
     denied = _guard_guardian(caller, patient_id, guardian_token, "get_nutrition_ceiling")
     if denied:
         return denied
