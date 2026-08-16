@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import hashlib
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -251,7 +252,7 @@ def get_lab_trend(
         return denied
     if query.analyte not in ANALYTES:
         return fail(
-            "INVALID_ARGUMENT",
+            "INVALID_INPUT",
             f"analyte={query.analyte} 未知，可选：{', '.join(sorted(ANALYTES))}",
         )
 
@@ -367,10 +368,10 @@ def upsert_lab_result(
         values, conversions = _normalize(request.lab)
     except ValueError as exc:
         # BUG-67 后补：别名换算后超出契约范围（如 scr_mg_dL=40 → scr_umol_L=3536 > 3000）
-        # 由 _normalize 抛 ValueError，此处转 INVALID_ARGUMENT 信封（回滚模式同路径）。
-        return fail("INVALID_ARGUMENT", str(exc))
+        # 由 _normalize 抛 ValueError，此处转 INVALID_INPUT 信封（回滚模式同路径）。
+        return fail("INVALID_INPUT", str(exc))
     if not values:
-        return fail("INVALID_ARGUMENT", "lab 中未提供任何可识别的检验指标")
+        return fail("INVALID_INPUT", "lab 中未提供任何可识别的检验指标")
 
     # B1 修复（2026-08-13）：并发写入 sample_id 碰撞——「当前面板数+1」在并发下
     # 两个请求读到相同 existing → 相同 sample_id → append_lab_record 覆盖写静默丢一条。
@@ -384,7 +385,16 @@ def upsert_lab_result(
     if request.lab.sample_id:
         sample_id = request.lab.sample_id
     else:
-        id_key = f"{request.patient_id}|{request.lab.report_date.isoformat()}|{sorted(values.items())}"
+        # A4-1（2026-08-16，十审）：幂等键**定精度归一化**——此前
+        # `sorted(values.items())` 用 Python repr 直接哈希：① 60（int）与 60.0
+        # （float）repr 不同（'60' vs '60.0'）；② 浮点计算噪声（0.1*3 =
+        # 0.30000000000000004 vs 0.3）repr 不同。两者都会生成不同 sample_id →
+        # EXPECT_NOT_EXIST 主键防撞被击穿 → LIS 重试同一化验写两条（正是 S-2
+        # 确定性 id 本要防的故障）。统一 round 4 位（与 _normalize 别名换算同
+        # 精度）+ json.dumps sort_keys（键序无关），幂等键对类型/噪声鲁棒。
+        _norm_vals = {k: round(float(v), 4) for k, v in values.items()}
+        id_key = (f"{request.patient_id}|{request.lab.report_date.isoformat()}|"
+                  + json.dumps(_norm_vals, sort_keys=True, ensure_ascii=False))
         sample_id = f"{request.patient_id}-S{hashlib.sha1(id_key.encode('utf-8')).hexdigest()[:8]}"
     record = {
         "patient_id": request.patient_id,

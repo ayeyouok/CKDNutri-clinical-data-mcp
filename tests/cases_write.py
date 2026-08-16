@@ -157,7 +157,7 @@ def _upsert_extra():
             "P0013", {"report_date": _TODAY, "k_mmol_L": 4.5, "cholesterol": 5.0},
             write_mode=False,
         )
-    assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
+    assert res["ok"] is False and res["error"] == "INVALID_INPUT", res
 
 
 @check("upsert / 越界数值被拒")
@@ -167,7 +167,7 @@ def _upsert_range():
             "P0013", {"report_date": _TODAY, "k_mmol_L": 99},
             write_mode=False,
         )
-    assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
+    assert res["ok"] is False and res["error"] == "INVALID_INPUT", res
 
 
 @check("upsert / NaN/Inf 化验值被拒且无写入副作用（S4：NaN 穿透范围校验的回归防线）")
@@ -179,7 +179,7 @@ def _upsert_nan():
                 "P0013", {"report_date": _TODAY, "k_mmol_L": bad},
                 write_mode=False,
             )
-        assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", (bad, res)
+        assert res["ok"] is False and res["error"] == "INVALID_INPUT", (bad, res)
     assert fake_labs_store_count() == before, "NaN/Inf 写入产生了副作用"
 
 
@@ -189,7 +189,7 @@ def _upsert_empty():
         res = core.upsert_lab_result(
             "P0013", {"report_date": _TODAY}, write_mode=False
         )
-    assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
+    assert res["ok"] is False and res["error"] == "INVALID_INPUT", res
 
 
 @check("upsert / 未知患者返回 NOT_FOUND")

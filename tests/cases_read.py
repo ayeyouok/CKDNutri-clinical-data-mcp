@@ -152,7 +152,7 @@ def _labs_404():
 def _labs_badid():
     with as_caller("doctor_assistant"):
         res = core.get_labs("abc")
-    assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
+    assert res["ok"] is False and res["error"] == "INVALID_INPUT", res
 
 
 @check("get_critical_values 命中高钾危急例 P0028")
@@ -262,7 +262,7 @@ def _trend_parent_no_token():
 @check("get_lab_trend 未知指标被拒")
 def _trend_bad():
     res = core.get_lab_trend("P0013", "potassium")
-    assert res["ok"] is False and res["error"] == "INVALID_ARGUMENT", res
+    assert res["ok"] is False and res["error"] == "INVALID_INPUT", res
 
 
 @check("list_patients 分页语义（医生端量级防护，2026-08-13）")
@@ -369,7 +369,7 @@ def _b2_parent_allowlist():
         assert key not in leaves, f"家长视图泄露字段 {key}"
 
 
-@check("S6 / 畸形 patient_id 在所有 HIS 工具入口被拒（INVALID_ARGUMENT）")
+@check("S6 / 畸形 patient_id 在所有 HIS 工具入口被拒（INVALID_INPUT）")
 def _s6_patient_id_validation():
     """S6 修复回归：畸形 patient_id 不得进入存储/查询层。
 
@@ -384,11 +384,11 @@ def _s6_patient_id_validation():
             for tool in (his.get_patient_profile, his.get_diagnosis,
                          his.get_nutrition_ceiling):
                 res = tool(bad)
-                assert res.get("error") == "INVALID_ARGUMENT", (tool.__name__, bad, res)
+                assert res.get("error") == "INVALID_INPUT", (tool.__name__, bad, res)
             res = his.verify_guardian_binding(bad, "tok")
-            assert res.get("error") == "INVALID_ARGUMENT", ("verify", bad, res)
+            assert res.get("error") == "INVALID_INPUT", ("verify", bad, res)
             res = his.issue_guardian_token(bad)
-            assert res.get("error") == "INVALID_ARGUMENT", ("issue", bad, res)
+            assert res.get("error") == "INVALID_INPUT", ("issue", bad, res)
     # 合法 id 不受影响
     with as_caller("doctor_assistant"):
         assert his.get_patient_profile("P0013")["ok"] is True
