@@ -31,7 +31,7 @@ import threading
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from a207_policy import atomic_write_json, resolve_state_path
+from a207_policy import ConflictError, atomic_write_json, resolve_state_path
 from a207_policy.storage import TablestoreBase, ensure_json_backend_allowed  # 2026-08-15：共享 Tablestore 基础设施
 
 from . import his as _his
@@ -224,7 +224,9 @@ class LocalJsonRepository:
             # sample_id 合并时后写覆盖先写，等价于丢一条）。
             sid = record.get("sample_id")
             if any(r.get("sample_id") == sid for r in records):
-                raise RuntimeError(
+                # 九审（2026-08-16）：统一抛 ConflictError（与 Tablestore 端同口径，
+                # 经 translate_error 映射 CONFLICT 信封，编排层可区分业务冲突 vs 内部错误）
+                raise ConflictError(
                     f"sample_id={sid} 已存在（并发冲突或重复提交），拒绝覆盖写入；"
                     f"请更换 sample_id 或确认是否为重复请求")
             records.append(record)
@@ -426,9 +428,11 @@ class TablestoreRepository(TablestoreBase):
         except OTSClientError as exc:
             # LOW-6（2026-08-15）：直接捕获 SDK 异常类（此前 `except Exception` +
             # `type(exc).__name__ == "OTSClientError"` 字符串比对——类名若变即失效）。
-            # SDK 条件不满足抛 OTSClientError；统一转成带业务语义的 RuntimeError
-            # （fail-closed：调用方看到的是"冲突"，而不是"写入成功但被覆盖"）。
-            raise RuntimeError(
+            # SDK 条件不满足抛 OTSClientError；统一转成**业务冲突异常**（九审，
+            # 2026-08-16：此前 RuntimeError 被 translate_error 归 INTERNAL_ERROR，
+            # 编排层无法区分"服务端坏了" vs "业务冲突"——现抛 ConflictError，
+            # translate_error 显式映射 CONFLICT 信封）。
+            raise ConflictError(
                 f"sample_id={sid} 已存在（并发冲突或重复提交），拒绝覆盖写入；"
                 f"请更换 sample_id 或确认是否为重复请求") from exc
         # 返回写库总条数（与 store.append_record 语义一致）。

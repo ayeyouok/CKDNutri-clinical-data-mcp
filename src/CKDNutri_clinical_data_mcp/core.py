@@ -16,6 +16,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from a207_policy import (
+    ConflictError,
     LIS_CRITICAL_CHANNEL,
     PARENT_ROLE,
     LIS_READ_FULL,
@@ -397,13 +398,13 @@ def upsert_lab_result(
 
     try:
         store_size = _repo().append_lab_record(record) if request.write_mode else None
-    except RuntimeError as exc:
+    except ConflictError as exc:
+        # 九审（2026-08-16）：repository 统一抛 ConflictError（替代字符串匹配）。
         # S-2：确定性 id 重试命中已存在（并发保护抛"sample_id 已存在"）→ 幂等成功，
         # 不落两行、不把重试当错误卡死（LIS 重试收到成功即停止）。
-        if request.write_mode and not request.lab.sample_id and "已存在" in str(exc):
+        if request.write_mode and not request.lab.sample_id:
             return {
                 "ok": True,
-                "recommend_reevaluate": True,
                 "data": {
                     "patient_id": request.patient_id,
                     "sample_id": sample_id,
@@ -411,6 +412,10 @@ def upsert_lab_result(
                     "persisted": True,
                     "write_mode": True,
                     "idempotent_hit": True,
+                    # 九审（2026-08-16）：recommend_reevaluate 收进 data——此前与 ok
+                    # 顶层并列（信封契约 {ok, data} 外泄业务标志），且幂等命中分支与
+                    # 正常分支结构不一致（正常分支 data 内含 next_action 而本分支缺）。
+                    "recommend_reevaluate": True,
                     "note": "同日期同指标集的化验已存在（确定性 sample_id 幂等命中），"
                             "未重复写入",
                     "store_record_count": None,
@@ -419,21 +424,19 @@ def upsert_lab_result(
                     "critical_count": len(critical_hits(values)),
                 },
             }
-        # L（2026-08-16，第七轮审查）：**显式 sample_id** 冲突 → CONFLICT 信封（此前
-        # RuntimeError 冒泡到 server 被 translate_error 归 INTERNAL_ERROR——调用方
-        # 无法区分"服务端内部错误"与"业务冲突"；冲突是预期业务语义，应显式提示换 id）。
-        if request.write_mode and "已存在" in str(exc):
-            return {
-                "ok": False,
-                "error": "CONFLICT",
-                "detail": f"sample_id={sample_id} 已存在（并发冲突或重复提交），"
-                          "拒绝覆盖写入；请更换 sample_id 或确认是否为重复请求",
-            }
-        raise
+        # L（2026-08-16，第七轮审查）+ 九审：**显式 sample_id** 冲突 → CONFLICT 信封
+        # （repository 已抛 ConflictError，此处直接捕获；此前 RuntimeError 冒泡到
+        # server 被 translate_error 归 INTERNAL_ERROR——调用方无法区分"服务端内部
+        # 错误"与"业务冲突"；冲突是预期业务语义，应显式提示换 id）。
+        return {
+            "ok": False,
+            "error": "CONFLICT",
+            "detail": f"sample_id={sample_id} 已存在（并发冲突或重复提交），"
+                      "拒绝覆盖写入；请更换 sample_id 或确认是否为重复请求",
+        }
     hits = critical_hits(values)
     return {
         "ok": True,
-        "recommend_reevaluate": True,
         "data": {
             "patient_id": request.patient_id,
             "sample_id": sample_id,
@@ -445,6 +448,9 @@ def upsert_lab_result(
             "unit_conversions": conversions,
             "critical_count": len(hits),
             "critical_items": hits,
+            # 九审（2026-08-16）：recommend_reevaluate 收进 data（与幂等命中分支
+            # 同口径，信封契约 {ok, data} 统一；此前顶层并列 = 契约漂移）。
+            "recommend_reevaluate": True,
             "next_action": REEVALUATE_HINT,
             "notify_action": NOTIFY_HINT if hits else None,
         },

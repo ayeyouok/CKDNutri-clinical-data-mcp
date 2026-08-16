@@ -32,7 +32,8 @@ def _upsert_ok():
             "P0013", {"report_date": _TODAY, "k_mmol_L": 5.4, "p_mmol_L": 2.0, "hb_g_L": 108},
         )
     assert res["ok"] is True, res
-    assert res["recommend_reevaluate"] is True, res
+    # 九审（2026-08-16）：recommend_reevaluate 收进 data（信封契约 {ok, data} 统一）
+    assert res["data"]["recommend_reevaluate"] is True, res
     data = res["data"]
     assert data["persisted"] is True
     assert data["store_record_count"] >= 1
@@ -70,7 +71,7 @@ def _upsert_dryrun():
             "P0014", {"report_date": _TODAY, "k_mmol_L": 4.8},
             write_mode=False,
         )
-    assert res["ok"] is True and res["recommend_reevaluate"] is True, res
+    assert res["ok"] is True and res["data"]["recommend_reevaluate"] is True, res
     assert res["data"]["persisted"] is False, res["data"]
     assert fake_labs_store_count() == before, "回滚模式仍然写库了"
 
