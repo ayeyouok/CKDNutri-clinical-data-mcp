@@ -23,6 +23,7 @@ from typing import Any
 from a207_policy import (
     CLINICIAN_ONLY_FIELDS,
     PARENT_ROLE,
+    PARENT_EQUIVALENT_ROLES,
     HIS_ALLOWED_FILTER_KEYS,
     HIS_COHORT,
     P1_PARENT_HIDDEN_FIELDS,
@@ -389,9 +390,10 @@ def _token_expired(expires_at: Any, now: datetime) -> bool:
 
 
 def _scope_of(caller: str) -> str:
-    # BUG-31（2026-08-12）：删除退役角色 nutritionist 分支（v2.3 阶段 0 已退役，
-    # CALLERS 仅剩 3 个身份）；家长受限视图、其余（doctor/risk）全量。
-    if caller == PARENT_ROLE:
+    # BUG-31（2026-08-12）：删除退役角色 nutritionist 分支（v2.3 阶段 0 已退役）。
+    # 2026-08-17：家长受限视图扩展到 PARENT_EQUIVALENT_ROLES（家长 + 演示家长），
+    # 其余（doctor/risk）全量。新增家长等价身份只需改 PARENT_EQUIVALENT_ROLES。
+    if caller in PARENT_EQUIVALENT_ROLES:
         return "limited_parent"
     return "full"
 

@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
-"""P1 临床数据域 DAO 层（v3.0：唯一后端 = 阿里云表格存储 Tablestore）。
+"""P1 临床数据域 DAO 层（默认生产后端 = 阿里云表格存储 Tablestore；A207_STORAGE_BACKEND=json 为受控开发模式）。
 
 设计目标：
 - 数据访问契约与存储实现解耦：业务层（his.py / core.py）只面向本层接口编程，
-  存储后端固定为 Tablestore，业务逻辑零感知。
+  存储后端可切换（默认 Tablestore ↔ json 开发模式），业务逻辑零感知。
 - 本层只做「数据存取」，不做权限/脱敏/业务计算——那些留在 his.py / core.py。
 
-v3.0（2026-08-13）：**删除 JSON 双后端**（用户决策：不要双后端）——此前
-A207_STORAGE_BACKEND=json 的 LocalJsonRepository 及其 labs_store.json 写库一并移除，
-Tablestore 为唯一数据后端；guardian_tokens 从本层移除（令牌校验在跨包共享层
-a207-policy，以 JSON 文件为事实源，his.py 直接读写，不经过本层）。
+后端选择（环境变量，与 P2/P3 同语义）：
+- 缺省 / A207_STORAGE_BACKEND=tablestore：阿里云表格存储（生产，需配 A207_OTS_*，
+  缺参 fail-fast，不静默回退）
+- A207_STORAGE_BACKEND=json：本地 JSON 文件（本地开发/测试，须显式
+  A207_ACCEPT_DEV_STORAGE=1 确认，否则 fail-closed 拒绝——防误部署生产）
+
+v3.0（2026-08-13）曾计划删除 JSON 双后端；v3.1 恢复 LocalJsonRepository 作为受
+`A207_ACCEPT_DEV_STORAGE=1` 闸门约束的**开发/测试模式**（生产默认仍 Tablestore）。
+guardian_tokens 不经本层——令牌校验在跨包共享层 a207-policy，以 JSON 文件为事实源，
+his.py 直接读写。
 
 Tablestore 连接参数（由部署环境注入，与 A207_CALLER 同模式，不入代码）：
 - A207_OTS_ENDPOINT       形如 https://xxx.cn-hangzhou.ots.aliyuncs.com
