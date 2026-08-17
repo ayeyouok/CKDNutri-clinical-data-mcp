@@ -189,12 +189,33 @@ def fake_labs_store_records() -> list[dict]:
 
 
 RESULTS: list[tuple[str, bool, str]] = []
+# 十二审（2026-08-17）：@check 注册的用例函数（直跑 report() 统一执行）。
+# 此前 check 在 **import 时立即执行** fn()——pytest 收集 test_* 后再次执行造成
+# 双执行（有状态副作用用例如 upsert 第二次失败）。改为**延迟执行**：check 只
+# 注册 + 注册 test_ 前缀（pytest 收集），直跑 report() 统一执行。各只跑一次。
+CHECK_FNS: list[tuple[str, Any]] = []
 
 
 def check(name: str):
-    """把一个断言函数注册为用例，立即执行并记录结果。"""
+    """把一个断言函数注册为用例（延迟执行——直跑 report() / pytest test_* 各跑一次）。
+
+    十二审（2026-08-17）：以 test_ 前缀注册到**调用模块**全局——pytest 即可收集
+    @check 用例（CI 假绿阻断修复：此前 50 例只在直跑时执行，pytest/CI 不收集）。
+    """
 
     def wrapper(fn):
+        CHECK_FNS.append((name, fn))
+        frame = sys._getframe(1)
+        _test_name = f"test_{fn.__name__.lstrip('_')}"
+        frame.f_globals[_test_name] = fn
+        return fn
+
+    return wrapper
+
+
+def _run_checks() -> None:
+    """直跑模式：统一执行全部 @check 用例，填充 RESULTS。"""
+    for name, fn in CHECK_FNS:
         try:
             fn()
             RESULTS.append((name, True, ""))
@@ -202,9 +223,6 @@ def check(name: str):
             RESULTS.append((name, False, str(exc) or "断言失败"))
         except Exception:  # noqa: BLE001
             RESULTS.append((name, False, traceback.format_exc(limit=2)))
-        return fn
-
-    return wrapper
 
 
 def numeric_leak(node) -> bool:
@@ -221,7 +239,8 @@ def numeric_leak(node) -> bool:
 
 
 def report() -> int:
-    """打印结果并返回进程退出码。"""
+    """打印结果并返回进程退出码（直跑模式：先统一执行全部 @check）。"""
+    _run_checks()
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     failed = [(n, m) for n, ok, m in RESULTS if not ok]
     for name, ok, msg in RESULTS:

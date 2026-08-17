@@ -25,7 +25,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from a207_policy import resolve_state_path
+from a207_policy import ConflictError, resolve_state_path
 
 from .repository import (
     TABLE_LABS,
@@ -117,7 +117,11 @@ def migrate() -> dict[str, int]:
         try:
             repo.append_lab_record(record)
             store_rows += 1
-        except RuntimeError as exc:
+        except ConflictError as exc:
+            # 十二审（2026-08-17）：**捕获 ConflictError**——append_lab_record 自
+            # 十审起改抛 ConflictError（跨包错误码统一，非 RuntimeError 子类），
+            # 此前 except RuntimeError 匹配不到 → 二次运行第一条即抛 ConflictError
+            # 冒泡中断迁移，"可重跑补齐"承诺失效（幂等重跑测试场景）。
             if "已存在" in str(exc) or "sample_id" in str(exc):
                 store_skipped += 1
             else:

@@ -200,6 +200,9 @@ class _CrossProcessTokenLock:
         return self
 
     def __exit__(self, *exc):
+        # 十二审（2026-08-17）：try/finally——unlock 抛异常不得掩盖主异常，且
+        # 必须确保 close（fd 泄漏）；unlock 失败不重抛（避免掩盖 with 块主异常），
+        # close 兜底释放 fd。
         try:
             import msvcrt
 
@@ -208,7 +211,10 @@ class _CrossProcessTokenLock:
             import fcntl
 
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        self._fh.close()
+        except BaseException:  # noqa: BLE001  # unlock 失败不掩盖主异常
+            pass
+        finally:
+            self._fh.close()
         return False
 
 

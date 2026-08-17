@@ -42,9 +42,11 @@ def test_cd_b3_recorded_at_roundtrip():
     import inspect
     code = inspect.getsource(src)
     assert "recorded_at" in code, "Tablestore append 未写 recorded_at"
-    # 读回对称：deserialize 路径含 recorded_at 键
-    read_src = inspect.getsource(repo.TablestoreRepository._range_all)
-    assert "recorded_at" in read_src or True  # 序列化侧已断言；读回由联调覆盖
+    # 读回对称：get_panels（读回面板）含 recorded_at 键——CD-B3 修复要求双后端
+    # 形状一致（十二审：此前的 `or True` 是恒真断言，pytest 收集后失去意义；
+    # 改为检查真实读回对称点）。
+    desrc = inspect.getsource(repo.TablestoreRepository.get_panels)
+    assert "recorded_at" in desrc, "Tablestore get_panels 未读回 recorded_at"
 
 
 def test_cd_b4_age_at_report():

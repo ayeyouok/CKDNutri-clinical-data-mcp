@@ -260,8 +260,12 @@ def _no_fastmcp():
         if (SRC / "CKDNutri_clinical_data_mcp" / name).exists()
         and pattern.search((SRC / "CKDNutri_clinical_data_mcp" / name).read_text(encoding="utf-8"))
     ]
+    # 十二审（2026-08-17）：移除 sys.modules 进程级断言——pytest 收集阶段
+    # test_import_smoke 会 import server（fastmcp 依赖）进 sys.modules，该断言在
+    # pytest 下必然误报（测试隔离问题，非产品缺陷）。真实契约是"纯逻辑层源码
+    # 不 import fastmcp"（上方断言已覆盖）；server 层（唯一允许 fastmcp 的层）
+    # 由 test_import_smoke 单独验证。
     assert not offenders, f"纯逻辑层引入了 fastmcp：{offenders}"
-    assert "fastmcp" not in sys.modules, "测试进程意外加载了 fastmcp"
 
 
 @check("每个指标都有儿童参考区间")
