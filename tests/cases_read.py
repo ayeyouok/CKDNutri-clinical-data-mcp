@@ -40,6 +40,25 @@ def _dataset():
     assert all(len(p["panels"]) >= 2 for p in patients), "存在不足 2 次采样的病例"
 
 
+@check("P1-7 / patients.json biochemistry 键名与 ANALYTES 契约一致（无双轨长名）")
+def _p1_7_bio_keys_contract():
+    """P1-7（2026-08-17）：HIS 主数据 biochemistry 键名必须落在 ANALYTES 契约键内
+    （外加 sample_date/pd_dialysate_glucose_g_per_day/note 元数据键），杜绝与 LIS
+    双轨长名（potassium_mmol_L 等）漂移——此前生成器输出长名、ANALYTES 用短键，
+    同指标两套键名并存。"""
+    from CKDNutri_clinical_data_mcp.reference import ANALYTES
+
+    meta_keys = {"sample_date", "pd_dialysate_glucose_g_per_day", "note"}
+    dataset = his.load_dataset(force_reload=True)
+    bad = []
+    for p in dataset["patients"]:
+        for rec in p.get("biochemistry", []):
+            unknown = set(rec) - set(ANALYTES) - meta_keys
+            if unknown:
+                bad.append((p["patient_id"], rec.get("sample_date"), sorted(unknown)))
+    assert not bad, f"patients.json biochemistry 存在非契约键（双轨长名残留）：{bad[:3]}"
+
+
 @check("数据集内部一致：分期与 eGFR 不矛盾")
 def _stage_consistency():
     bands = {
@@ -364,8 +383,11 @@ def _b2_parent_allowlist():
         f"{sorted(leaked)}。新增敏感字段必须显式加入 a207_policy 脱敏集合（单一事实源）。")
 
     # ③ 核心叶子逐一断言（显式点名，防集合误配）
+    # P1-1（2026-08-17）：set_by（医生标识 doc-xxxx）不得透传家长——已列入
+    # _PARENT_HIDDEN_FIELDS，家长视图的 nutrition_ceiling 内部也会被递归剥离。
     for key in ("scr_umol_L", "egfr_ml_min", "z_score_height", "stage_confirmed_by",
-                "food_diary_5d", "biochemistry", "medical_record_no", "dialysis_detail"):
+                "food_diary_5d", "biochemistry", "medical_record_no", "dialysis_detail",
+                "set_by"):
         assert key not in leaves, f"家长视图泄露字段 {key}"
 
 

@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "CKDNutri-clinical-data-mcp"
-version = "1.2.21"
+# 十三审（v1.2.22）：在远端 v1.2.21（CI 发布护栏/家长等效可见性）之上叠加报告3 修复。
+version = "1.2.22"
 description = "P1 临床数据域——患儿档案+化验面板"
 requires-python = ">=3.10"
 dependencies = [

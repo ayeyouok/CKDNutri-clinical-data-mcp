@@ -153,8 +153,21 @@ def get_critical_values(
     if not panels:
         return no_data(query.patient_id)
 
-    latest = panels[-1]
-    hits = critical_hits(latest["values"])
+    # P1-4（2026-08-18）：危急扫描从"仅最新一次采样"扩为"最新报告日全部采样"。
+    # 此前 latest = panels[-1]（同日多采样取 sample_id 最大者），同日较早采样的危急
+    # 值（如晨 K=7.0、午后复查 K=5.0 正常）被漏扫，通知链路静默不触发——医疗安全缺口。
+    # 现取最新报告日的全部面板做危急扫描（按指标去重合并），不漏同日任一采样；
+    # 不扫历史面板（不把旧危急误报为当前危急）。
+    latest_date = panels[-1]["report_date"]
+    same_day = [p for p in panels if p["report_date"] == latest_date]
+    latest = panels[-1]  # 仅用于 report_date/sample_id 展示（最新采样）
+    hits: list[dict[str, object]] = []
+    _seen_analytes: set[str] = set()
+    for _p in same_day:
+        for _h in critical_hits(_p["values"]):
+            if _h["analyte"] not in _seen_analytes:
+                _seen_analytes.add(_h["analyte"])
+                hits.append(_h)
     # 2026-08-13（用户决策）：危急值明细对家长可见（家长知情权；现实中医院会主动
     # 告知危急值）。家长分支仍强制 guardian_token（防跨患者读取），但不落
     # CRITICAL_CHANNEL 通知链路（通知是 doctor/risk_warning 的职责）。
@@ -188,7 +201,7 @@ def get_critical_values(
             "patient_id": query.patient_id,
             "report_date": latest["report_date"],
             "sample_id": latest["sample_id"],
-            "scan_scope": "latest_panel",
+            "scan_scope": "latest_day",  # P1-4：最新报告日全部采样（非仅最新一次）
             # L（2026-08-16）：医生分支补 data_scope（家长分支已有 parent_full，信封对称）
             "data_scope": "full",
             "critical_count": len(hits),
@@ -277,6 +290,12 @@ def get_lab_trend(
         trend = build_trend(
             panels, query.analyte, float(patient["age_years"]), patient["sex"]
         )
+        # P1-2（2026-08-18）：窗口内该指标无采样（point_count==0）≠ 趋势持平。
+        # 此前 build_trend 对 latest is None 静默标 "flat"（误导为"测过且没变"），
+        # 现明确返回 NO_DATA（无该指标数据），与空面板同口径，不伪造"持平"趋势。
+        if trend["point_count"] == 0:
+            return no_data(query.patient_id,
+                           f"patient_id={query.patient_id} 在窗口内无 {query.analyte} 化验数据，无法生成趋势")
         trend["patient_id"] = query.patient_id
         trend["window_days"] = query.window_days
         trend["data_scope"] = "parent_full"
@@ -286,6 +305,9 @@ def get_lab_trend(
     trend = build_trend(
         panels, query.analyte, float(patient["age_years"]), patient["sex"]
     )
+    if trend["point_count"] == 0:
+        return no_data(query.patient_id,
+                       f"patient_id={query.patient_id} 在窗口内无 {query.analyte} 化验数据，无法生成趋势")
     trend["patient_id"] = query.patient_id
     trend["window_days"] = query.window_days
     return {"ok": True, "data": trend}
@@ -373,6 +395,9 @@ def upsert_lab_result(
         return fail("INVALID_INPUT", str(exc))
     if not values:
         return fail("INVALID_INPUT", "lab 中未提供任何可识别的检验指标")
+    # P1-3（2026-08-18）：幂等命中分支与正常分支共用同一 critical_hits 结果，
+    # 保证两条路径信封结构一致（critical_items/next_action/notify_action 同步）。
+    hits = critical_hits(values)
 
     # B1 修复（2026-08-13）：并发写入 sample_id 碰撞——「当前面板数+1」在并发下
     # 两个请求读到相同 existing → 相同 sample_id → append_lab_record 覆盖写静默丢一条。
@@ -432,7 +457,13 @@ def upsert_lab_result(
                     "store_record_count": None,
                     "analytes_written": sorted(values),
                     "unit_conversions": conversions,
-                    "critical_count": len(critical_hits(values)),
+                    "critical_count": len(hits),
+                    # P1-3（2026-08-18）：幂等命中信封与正常分支对称——补 critical_items
+                    # /next_action/notify_action，否则 LIS 超时重试命中同 id 时危急通知
+                    # 链路被静默跳过（正常分支有、幂等分支缺，信封漂移）。
+                    "critical_items": hits,
+                    "next_action": REEVALUATE_HINT,
+                    "notify_action": NOTIFY_HINT if hits else None,
                 },
             }
         # L（2026-08-16，第七轮审查）+ 九审：**显式 sample_id** 冲突 → CONFLICT 信封

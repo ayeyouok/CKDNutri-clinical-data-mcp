@@ -193,7 +193,7 @@ _SHORT_TO_ANALYTE: dict[str, str] = {
     "bun": "bun_mmol_L", "bicarbonate": "hco3_mmol_L", "uric_acid": "ua_umol_L",
 }
 
-# 延迟导入主包 ANALYTES（避免 data 子模块与主包循环；_lab_value 内 lazy）
+# 延迟导入主包 ANALYTES（避免 data 子模块与主包循环；_worse_of 内 lazy）
 _MAIN_ANALYTES: dict | None = None
 
 
@@ -254,22 +254,28 @@ def build_biochemistry(rng: Random, stage: str, dialysis: str, height_cm: float,
         albumin = _lab_value(rng, stage, dialysis, "albumin", drift, 1)
         if glomerular:
             albumin = round(max(20.0, albumin - rng.uniform(4.0, 11.0)), 1)
+        # P1-7（2026-08-18）：HIS biochemistry 键名对齐主包 ANALYTES 契约短键——此前
+        # 用长名（potassium_mmol_L / egfr_ml_min_1_73m2 / ...），与 LIS 基线、models、
+        # ANALYTES 契约双轨（同指标两套键名，跨包消费取不到值）。统一契约键
+        # （k_mmol_L / egfr_ml_min / p_mmol_L / ca_mmol_L / na_mmol_L / hco3_mmol_L /
+        # hb_g_L / ipth_pg_mL / ua_umol_L / vitd25oh_nmol_L / upcr_mg_mmol），下游
+        # decorate_panel/build_trend/critical_hits 直接按契约键取数。
         record: dict[str, Any] = {
             "sample_date": sample_date.isoformat(),
             "scr_umol_L": scr,
-            "egfr_ml_min_1_73m2": egfr,
+            "egfr_ml_min": egfr,
             "bun_mmol_L": _lab_value(rng, stage, dialysis, "bun", drift, 1),
-            "potassium_mmol_L": _lab_value(rng, stage, dialysis, "potassium", drift, 2),
-            "phosphorus_mmol_L": _lab_value(rng, stage, dialysis, "phosphorus", drift, 2),
-            "calcium_mmol_L": _lab_value(rng, stage, dialysis, "calcium", drift, 2),
-            "sodium_mmol_L": _rr(rng, 133.0, 142.0, 0),
-            "bicarbonate_mmol_L": _lab_value(rng, stage, dialysis, "bicarbonate", drift, 1),
+            "k_mmol_L": _lab_value(rng, stage, dialysis, "potassium", drift, 2),
+            "p_mmol_L": _lab_value(rng, stage, dialysis, "phosphorus", drift, 2),
+            "ca_mmol_L": _lab_value(rng, stage, dialysis, "calcium", drift, 2),
+            "na_mmol_L": _rr(rng, 133.0, 142.0, 0),
+            "hco3_mmol_L": _lab_value(rng, stage, dialysis, "bicarbonate", drift, 1),
             "albumin_g_L": albumin,
-            "hemoglobin_g_L": round(_lab_value(rng, stage, dialysis, "hemoglobin", drift, 0)),
-            "pth_pg_mL": round(_lab_value(rng, stage, dialysis, "pth", drift, 0)),
-            "uric_acid_umol_L": round(_lab_value(rng, stage, dialysis, "uric_acid", drift, 0)),
-            "vitamin_d_25oh_nmol_L": _rr(rng, 28.0, 72.0),
-            "urine_pcr_mg_mmol": _rr(rng, 220.0, 780.0) if glomerular else _rr(rng, 15.0, 190.0),
+            "hb_g_L": round(_lab_value(rng, stage, dialysis, "hemoglobin", drift, 0)),
+            "ipth_pg_mL": round(_lab_value(rng, stage, dialysis, "pth", drift, 0)),
+            "ua_umol_L": round(_lab_value(rng, stage, dialysis, "uric_acid", drift, 0)),
+            "vitd25oh_nmol_L": _rr(rng, 28.0, 72.0),
+            "upcr_mg_mmol": _rr(rng, 220.0, 780.0) if glomerular else _rr(rng, 15.0, 190.0),
         }
         if pd_glucose_g is not None:
             record["pd_dialysate_glucose_g_per_day"] = round(

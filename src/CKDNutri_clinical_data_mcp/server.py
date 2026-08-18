@@ -120,11 +120,12 @@ def list_patients_tool(filter: dict = None, page: int = 1, page_size: int = 50) 
     - **查询单个患者请直接用 get_patient_profile_tool(patient_id)**，不要用本工具
       全量拉取后再找——患者多时本工具分页返回，全量拉取会浪费大量时间与上下文。
     - 本工具用于**按条件筛查队列**：filter 支持 age_band / ckd_stage / dialysis /
-      sex / primary_disease / min_age_years / max_age_years 等键（见 INVALID_FILTER
-      报错提示）；不传 filter 时返回全部患者的第一页。
+      sex / primary_disease / min_age_years / max_age_years 等键（不支持的键会
+      返回错误提示）；不传 filter 时返回全部患者的第一页。
     - 分页：page 从 1 起；page_size 默认 50、最大 200（超限自动钳制）。
       返回 has_more=true 表示还有下一页；total_matched 为匹配总数。
-    - 场景示例：查全部 G3 期患儿 → filter={"ckd_stage": "G3"}。
+    - 场景示例：查 G3a 期患儿 → filter={"ckd_stage": "G3a"}（CKD 分期为
+      G2/G3a/G3b/G4/G5 细分档，无 "G3" 这一档，查询需用细分档）。
     """
     try:
         return list_patients(filter, page=page, page_size=page_size)
@@ -134,11 +135,9 @@ def list_patients_tool(filter: dict = None, page: int = 1, page_size: int = 50) 
 
 @mcp.tool
 def list_known_patients_tool() -> dict[str, Any]:
-    """列出本 LIS 数据集覆盖的全部 patient_id（供跨包联调/编排核对）。
+    """列出本数据集覆盖的全部 patient_id（供跨包联调/编排核对）。
 
-    L（2026-08-16，第七轮审查）：core.list_known_patients 此前实现+测试齐全但**未注册
-    为 MCP 工具**（未接线）。仅临床/风险身份可用（COHORT_CALLERS 收口，家长不可枚举
-    患者花名册）；返回 {count, patient_ids}。
+    仅临床/风险身份可用，家长不可枚举患者花名册。返回 {count, patient_ids}。
     """
     try:
         return list_known_patients()
@@ -159,7 +158,7 @@ def get_nutrition_ceiling_tool(patient_id: str, guardian_token: Optional[str] = 
 
 @mcp.tool
 def get_labs_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
-    """查最新化验面板（2026-08-13 起家长可见完整化验数值，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
+    """查患儿化验面板（家长可见完整化验数值，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_labs(patient_id, guardian_token)
     except Exception as exc:
@@ -168,7 +167,7 @@ def get_labs_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict
 
 @mcp.tool
 def get_critical_values_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
-    """查当前危急值明细（2026-08-13 起家长可见命中明细，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
+    """查最新报告日危急值明细（家长可见命中明细，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_critical_values(patient_id, guardian_token)
     except Exception as exc:
@@ -178,7 +177,7 @@ def get_critical_values_tool(patient_id: str, guardian_token: Optional[str] = No
 @mcp.tool
 def get_lab_trend_tool(patient_id: str, analyte: str, window_days: int = None,
                        guardian_token: Optional[str] = None) -> dict[str, Any]:
-    """查指定指标最近 N 次趋势（2026-08-13 起家长可见完整数值趋势，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
+    """查指定指标的时间趋势（家长可见完整数值趋势，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_lab_trend(patient_id, analyte, window_days, guardian_token)
     except Exception as exc:

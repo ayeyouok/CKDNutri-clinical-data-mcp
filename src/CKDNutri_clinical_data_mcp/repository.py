@@ -143,7 +143,14 @@ class LocalJsonRepository:
                 f"检验写库 {LABS_STORE_FILENAME} 数据类型错误：期望 dict，"
                 f"实际为 {type(payload).__name__}，拒绝加载（防止静默清空）")
         records = payload.get("records", [])
-        return records if isinstance(records, list) else []
+        if not isinstance(records, list):
+            # P2（2026-08-18）：records 非 list 一律 fail-closed 拒绝加载（与上方
+            # payload 非 dict 同口径）——此前静默降级为 []，append_lab_record 重建
+            # 写库时原始记录无声清空（数据丢失且无告警），运维无从发现。
+            raise RuntimeError(
+                f"检验写库 {LABS_STORE_FILENAME} records 字段类型错误：期望 list，"
+                f"实际为 {type(records).__name__}，拒绝加载（防止静默清空）")
+        return records
 
     def _save_records(self, records: list[dict[str, Any]]) -> None:
         atomic_write_json(self._store_path(), {

@@ -113,27 +113,3 @@ class UpsertRequest(_Strict):
         if not PATIENT_ID_RE.match(v):
             raise ValueError("patient_id 需匹配 ^P[0-9]{4,}$（如 P0007）")
         return v
-
-
-class LabValueOut(BaseModel):
-    analyte: str
-    label: str
-    value: float
-    unit: str
-    ref_low: float | None = None
-    ref_high: float | None = None
-    status: str
-    status_label: str
-
-
-class ParentItemOut(BaseModel):
-    """家长受限视图条目：不含任何原始数值。"""
-
-    analyte: str
-    label: str
-    status: str
-    status_label: str
-    trend: str
-    trend_code: str
-    in_reference_range: bool
-    critical: bool

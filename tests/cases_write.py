@@ -305,6 +305,11 @@ def _b1_uuid_sample_id():
         )
     assert res1b["data"]["sample_id"] == sid, "同值重试应幂等命中同 id"
     assert res1b["data"].get("idempotent_hit") is True, "重试应标记幂等命中"
+    # P1-3（2026-08-17）：幂等命中信封与正常分支对称——补 critical_items/next_action
+    # /notify_action，否则 LIS 超时重试命中同 id 时危急通知链路被静默跳过。
+    assert res1b["data"].get("next_action") == "CKDNutri-assessment-mcp.assess_clinical_status_tool", res1b["data"]
+    assert "critical_items" in res1b["data"], res1b["data"]
+    assert "notify_action" in res1b["data"], res1b["data"]
     # 不同指标集 → 不同 id（碰撞免疫）
     with as_caller("doctor_assistant"):
         res2 = core.upsert_lab_result(
@@ -419,3 +424,47 @@ def _low4_append_prefix_scan():
     assert prefix == {"patient_id": "P0013"}, (table, pk_cols, prefix)
     assert pk_cols == ["patient_id", "sample_id"], pk_cols
     assert n == 0, n  # spy 返回空 → 计数 0（行为验证：返回值来自前缀结果）
+
+
+@check("P1-2 / 窗口内该指标无采样 → NO_DATA（不静默标 flat）")
+def _p1_2_trend_no_data():
+    """P1-2（2026-08-17）：指定指标在窗口内无任何采样时返回 NO_DATA——
+    此前 build_trend 对 latest is None 静默标 "flat"（误导为"测过且没变"）。"""
+    today = date.today().isoformat()
+    with as_caller("doctor_assistant"):
+        up = core.upsert_lab_result(
+            "P0016",
+            {"report_date": today, "k_mmol_L": 4.8, "sample_id": "p1-2-no-data-1"},
+        )
+    assert up["ok"] is True, up
+    # 今日面板仅含 k，na 不在其中且窗口(1天)只覆盖今日 → 该指标无数据 → NO_DATA
+    res = core.get_lab_trend("P0016", "na_mmol_L", window_days=1)
+    assert res["ok"] is False and res["error"] == "NO_DATA", res
+    # 对照：窗口内有数据的指标正常返回趋势
+    res2 = core.get_lab_trend("P0016", "k_mmol_L", window_days=1)
+    assert res2["ok"] is True and res2["data"]["point_count"] >= 1, res2
+
+
+@check("P1-4 / 同日多采样：较早采样的危急不被最新正常采样掩盖")
+def _p1_4_same_day_critical():
+    """P1-4（2026-08-17）：同日多次采样时危急扫描覆盖最新报告日全部采样——
+    此前只扫 panels[-1]（sample_id 最大者），晨 K=7.2 危急、午后复查 K=5.0 正常
+    时危急被静默掩盖（通知链路不触发）。现取同日全部面板并集，危急不丢。"""
+    today = date.today().isoformat()
+    with as_caller("doctor_assistant"):
+        a = core.upsert_lab_result(
+            "P0017",
+            {"report_date": today, "k_mmol_L": 7.2, "sample_id": "p1-4-0001"},
+        )
+        b = core.upsert_lab_result(
+            "P0017",
+            {"report_date": today, "k_mmol_L": 5.0, "sample_id": "p1-4-0002"},
+        )
+        res = core.get_critical_values("P0017")
+    assert a["ok"] is True and b["ok"] is True, (a, b)
+    assert res["ok"] is True, res
+    assert res["data"]["scan_scope"] == "latest_day", res["data"]
+    # 较早采样的危急仍在（修复前只扫 latest=0002 正常样本 → critical_count=0）
+    assert res["data"]["critical_count"] >= 1, res["data"]
+    analytes = {i["analyte"] for i in res["data"]["items"]}
+    assert "k_mmol_L" in analytes, analytes

@@ -23,8 +23,8 @@ def not_found(patient_id: str) -> dict[str, Any]:
     return fail("NOT_FOUND", f"patient_id={patient_id} 不在本 LIS 数据集内")
 
 
-def no_data(patient_id: str) -> dict[str, Any]:
-    return fail("NO_DATA", f"patient_id={patient_id} 暂无检验记录")
+def no_data(patient_id: str, message: str | None = None) -> dict[str, Any]:
+    return fail("NO_DATA", message or f"patient_id={patient_id} 暂无检验记录")
 
 
 def invalid(exc: ValidationError | ValueError) -> dict[str, Any]:

@@ -84,7 +84,9 @@ def _guard_access(tool: str, *, write: bool = False) -> dict[str, Any] | None:
 # F3（v2.3）：家长脱敏基准统一到 a207_policy 单一事实源。
 # 必剥集合 = 全系统医生专有叶子字段(CLINICIAN_ONLY_FIELDS) ∪ P1 专有聚合块(P1_PARENT_HIDDEN_FIELDS)。
 # nutrition_ceiling 是 P1 对家长的刻意放行（家长须知晓医生设定的摄入上限），从必剥集合剔除。
-_PARENT_HIDDEN_FIELDS = (CLINICIAN_ONLY_FIELDS | P1_PARENT_HIDDEN_FIELDS) - {"nutrition_ceiling"}
+# P1-1（2026-08-18）：nutrition_ceiling 内部 set_by 是医生标识（doc-xxxx），属临床专有标识，
+# 不得透传家长——单独列入必剥集合（nutrition_ceiling 本体仍对家长可见，仅剥 set_by）。
+_PARENT_HIDDEN_FIELDS = (CLINICIAN_ONLY_FIELDS | P1_PARENT_HIDDEN_FIELDS | {"set_by"}) - {"nutrition_ceiling"}
 # P1 一般（2026-08-15）：withheld 声明与实际剥离集合对齐——此前声明
 # P1_PARENT_HIDDEN_FIELDS | {"z_score_height","stage_confirmed_by"} 漏掉
 # CLINICIAN_ONLY_FIELDS 叶子、且可能含已被剔除放行的 nutrition_ceiling
@@ -417,15 +419,17 @@ def _diagnosis_block(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _demographics_block(p: dict[str, Any], scope: str) -> dict[str, Any]:
+    # P2（2026-08-18）：硬索引 KeyError 防御——与 _diagnosis_block 同口径（.get 兜底），
+    # 种子数据缺键/手工编辑旧版 JSON 时不再 500。ckd_stage 已用 .get。
     block = {
-        "age_years": p["age_years"],
-        "age_band": p["age_band"],
-        "age_band_label": p["age_band_label"],
-        "sex": p["sex"],
-        "height_cm": p["height_cm"],
-        "weight_kg": p["weight_kg"],
-        "bmi": p["bmi"],
-        "edema": p["edema"],
+        "age_years": p.get("age_years"),
+        "age_band": p.get("age_band"),
+        "age_band_label": p.get("age_band_label"),
+        "sex": p.get("sex"),
+        "height_cm": p.get("height_cm"),
+        "weight_kg": p.get("weight_kg"),
+        "bmi": p.get("bmi"),
+        "edema": p.get("edema"),
         # F-6（2026-08-15）：报告"基本信息"渲染 ckd_stage（content 契约要求
         # demographics 含 ckd_stage/dialysis_mode）——此前 ckd_stage 仅在 diagnosis
         # 块，报告层取 demographics 渲染为 None。分期非敏感（diagnosis 块家长可见），
@@ -434,8 +438,8 @@ def _demographics_block(p: dict[str, Any], scope: str) -> dict[str, Any]:
         "ckd_stage_numeric": p.get("ckd_stage_numeric"),
     }
     if scope != "limited_parent":
-        block["bsa_m2"] = p["bsa_m2"]
-        block["z_score_height"] = p["z_score_height"]
+        block["bsa_m2"] = p.get("bsa_m2")
+        block["z_score_height"] = p.get("z_score_height")
     return block
 
 
@@ -610,18 +614,24 @@ def _match(p: dict[str, Any], key: str, want: Any) -> bool:
     if key in ("age_band", "ckd_stage", "dialysis", "sex", "primary_disease"):
         values = want if isinstance(want, (list, tuple, set)) else [want]
         try:
-            return p[key] in set(values)
+            # P2（2026-08-18）：.get 兜底——主数据缺该枚举键时静默 KeyError 500，
+            # 缺键视为不匹配（与 _diagnosis_block 同口径）。
+            return p.get(key) in set(values)
         except TypeError:
             # 防御纵深：入口 _validate_filter 已拦不可哈希元素，此处双保险（fail-open 不匹配）
             return False
     if key == "has_allergies":
         # 入口 _validate_filter 已把字符串规范化为 bool，此处仅防御非 bool 输入
+        # P2（2026-08-18）：allergies 缺键 .get 兜底（缺过敏史视为无过敏）。
         want = want.strip().lower() == "true" if isinstance(want, str) else want
-        return bool(p["allergies"]) is bool(want)
-    if key == "min_age_years":
-        return p["age_years"] >= float(want)
-    if key == "max_age_years":
-        return p["age_years"] <= float(want)
+        return bool(p.get("allergies", [])) is bool(want)
+    if key in ("min_age_years", "max_age_years"):
+        # P2（2026-08-18）：age_years 缺键 .get 兜底——缺年龄无法判定区间，
+        # 视为不匹配（不 500）。
+        age = p.get("age_years")
+        if age is None:
+            return False
+        return age >= float(want) if key == "min_age_years" else age <= float(want)
     return False
 
 
@@ -707,6 +717,12 @@ def get_nutrition_ceiling(patient_id: str,
     p = _repo().get_patient(patient_id)
     if p is None:
         return _err("NOT_FOUND", f"patient_id={patient_id} 不在患者主数据中")
+    # P1-1（2026-08-18）：nutrition_ceiling 对家长可见（家长须知晓摄入上限），
+    # 但其内部 set_by 是医生标识（doc-xxxx），属临床专有标识不得透传家长——
+    # 家长视图走统一脱敏（set_by 已列入 _PARENT_HIDDEN_FIELDS 单一事实源，自动剥离）。
+    nc = dict(p["nutrition_ceiling"])
+    if _scope_of(caller) == "limited_parent":
+        nc = _strip_parent_sensitive(nc)
     return {
         "ok": True,
         "data": {
@@ -715,7 +731,7 @@ def get_nutrition_ceiling(patient_id: str,
             "weight_kg": p["weight_kg"],
             "ckd_stage": p["ckd_stage"],
             "dialysis": p["dialysis"],
-            "nutrition_ceiling": dict(p["nutrition_ceiling"]),
+            "nutrition_ceiling": nc,
             "allergies": list(p["allergies"]),
             "diet_restrictions": list(p["diet_restrictions"]),
             "units": {"energy": "kcal", "protein": "g", "potassium": "mg",
