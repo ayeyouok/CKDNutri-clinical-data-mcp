@@ -190,10 +190,15 @@ def get_critical_values(
                 "note": "危急值明细对家长可见（知情权）；请及时联系主管医生处置。",
             },
         }
+    # P1-02（2026-08-18）：历史危急值过滤从 panels[:-1] 改为**按报告日 < latest_date**——
+    # 此前排除的仅是"最后一条采样"，同日较早采样（同属最新报告日）仍被计入历史危急
+    # 值（P1-4 将当前危急扫描扩为最新报告日全采样后口径必须同步：历史 = 早于最新
+    # 报告日的全部采样，而非"除去最后一条"），否则当日危急既出现在 items 又出现在
+    # prior_panels_with_critical，统计重复。
     history = [
         {"report_date": p["report_date"], "hit_count": len(critical_hits(p["values"]))}
-        for p in panels[:-1]
-        if critical_hits(p["values"])
+        for p in panels
+        if p["report_date"] < latest_date and critical_hits(p["values"])
     ]
     return {
         "ok": True,
@@ -348,7 +353,19 @@ def _normalize(lab: LabResultIn) -> tuple[dict[str, float], list[str]]:
             continue
         converted = round(float(raw[alias]) * factor, 4)
         if target in values:
-            conversions.append(f"{alias} 与 {target} 同时给出，以契约字段 {target} 为准")
+            # P1-04（2026-08-18）：双单位并存必须**换算一致**——此前仅记转换说明、
+            # 直接以契约字段为准，契约值与别名换算值矛盾时（如 scr_umol_L=100 与
+            # scr_mg_dL=20 → 1768）静默写入错误值。容差 = 1% 相对 + 0.05 绝对
+            # （容忍调用方对别名值的四舍五入，如 1.13mg/dL=99.9 与 100 视为一致）。
+            tolerance = max(0.05, abs(values[target]) * 0.01)
+            if abs(values[target] - converted) > tolerance:
+                raise ValueError(
+                    f"{alias}={raw[alias]} 换算后 {target}={converted} 与契约字段 "
+                    f"{target}={values[target]} 矛盾（差值 "
+                    f"{abs(values[target] - converted):.4f} 超容差 {tolerance:.4f}），"
+                    "拒绝写入——请核对单位口径")
+            conversions.append(
+                f"{alias} 与 {target} 同时给出且换算一致（{converted}），校验通过")
             continue
         ge, le = _contract_bounds(target)
         if (le is not None and converted > le) or (ge is not None and converted < ge):
@@ -419,7 +436,12 @@ def upsert_lab_result(
         # 确定性 id 本要防的故障）。统一 round 4 位（与 _normalize 别名换算同
         # 精度）+ json.dumps sort_keys（键序无关），幂等键对类型/噪声鲁棒。
         _norm_vals = {k: round(float(v), 4) for k, v in values.items()}
-        id_key = (f"{request.patient_id}|{request.lab.report_date.isoformat()}|"
+        # P1-03（2026-08-18）：幂等键纳入 specimen_time（秒级规范化）——同日两次
+        # 完全同值的真实采样（不同采集时刻）生成不同 sample_id，不再被确定性 ID
+        # 误判为重复请求吞掉；重试（同 specimen_time 同值）仍命中同一 id 幂等。
+        _st = request.lab.specimen_time
+        _st_key = _st.isoformat(timespec="seconds") if _st is not None else ""
+        id_key = (f"{request.patient_id}|{request.lab.report_date.isoformat()}|{_st_key}|"
                   + json.dumps(_norm_vals, sort_keys=True, ensure_ascii=False))
         sample_id = f"{request.patient_id}-S{hashlib.sha1(id_key.encode('utf-8')).hexdigest()[:8]}"
     record = {
@@ -427,6 +449,8 @@ def upsert_lab_result(
         "sample_id": sample_id,
         "report_date": request.lab.report_date.isoformat(),
         "specimen": request.lab.specimen or "静脉血",
+        "specimen_time": (request.lab.specimen_time.isoformat(timespec="seconds")
+                          if request.lab.specimen_time else None),
         "values": values,
         "recorded_by": caller,
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

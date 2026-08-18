@@ -9,6 +9,8 @@ Scr umol/L；K/P/Ca/Na/Cl/BUN/HCO3 mmol/L；Alb/Hb g/L；iPTH pg/mL；UA umol/L�
 
 from __future__ import annotations
 
+import math
+
 # --- 指标元数据 -------------------------------------------------------------
 
 ANALYTES: dict[str, dict[str, str]] = {
@@ -50,11 +52,19 @@ def age_band(age_years: float) -> str:
     P1-1 修复（2026-08-15）：此前 `low <= age <= high` 双闭区间在整岁边界
     (3.999,4.0)/(6.999,7.0)/(12.999,13.0) 留缝，落缝年龄兜底 adolescent——
     真实年龄（如 3.9996 岁）被套青少年参考区间，化验状态静默错判。
+    P2-05（2026-08-18）：非法年龄 fail-closed——此前 -1 / 150 / NaN 全部静默
+    兜底 adolescent，套用青少年参考区间致化验状态静默错判（与 P1-1 同根源的
+    "兜底掩盖脏数据"）；显式抛 ValueError（调用链 translate_error 归
+    INVALID_INPUT 信封），拒绝静默套用参考区间。
     """
+    if isinstance(age_years, bool) or not isinstance(age_years, (int, float)) \
+            or not math.isfinite(age_years) or age_years < 0.0 or age_years >= 99.0:
+        raise ValueError(
+            f"age_years={age_years!r} 非法（需 0≤x<99 的有限数值），拒绝静默套用参考区间")
     for low, high, name in AGE_BANDS:
         if low <= age_years < high:
             return name
-    return "adolescent"
+    raise ValueError(f"age_years={age_years!r} 无法映射到参考区间分带")  # 理论不可达
 
 
 # --- 参考区间 ---------------------------------------------------------------

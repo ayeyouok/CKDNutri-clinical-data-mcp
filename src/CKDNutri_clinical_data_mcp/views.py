@@ -22,7 +22,32 @@ FLAT_TOLERANCE = 0.05
 # BUG-67 后补（2026-08-12）：前值接近 0 时按持平处理（防除零抖动），见 trend_code
 _EPSILON = 1e-10
 
+# P2-03（2026-08-18）：数据集年龄基准日缓存——patients.json 顶层 as_of 是 age_years
+# 快照日（生成器 BASE_DATE），采样时年龄推算的参考基准从运行时 today 改为 as_of。
+_AS_OF_CACHE: date | None = None
+_AS_OF_LOADED = False
+
 TREND_ARROW = {"up": "↑", "down": "↓", "flat": "→"}
+
+
+def _dataset_as_of() -> date | None:
+    """年龄基准日（数据集 as_of，date 对象）；不可用时返回 None（调用方回退 today）。
+
+    P2-03（2026-08-18）：age_years 是生成基准日（as_of，如 2026-08-01）的快照年龄，
+    若推算继续用运行时 today 扣减，会把"基准日至今"的天数一并扣掉（部署越久误差
+    越大，age_at_report 被系统性低估，跨年龄带分类漂移）。基准不可用（如 Tablestore
+    环境无 patients.json）时回退 today（既有语义，误差退化为原行为）。
+    """
+    global _AS_OF_CACHE, _AS_OF_LOADED
+    if not _AS_OF_LOADED:
+        _AS_OF_LOADED = True
+        try:
+            from . import his as _his
+            raw = _his.load_dataset().get("as_of")
+            _AS_OF_CACHE = date.fromisoformat(str(raw)) if raw else None
+        except Exception:  # noqa: BLE001 - 基准不可用回退 today（见 docstring）
+            _AS_OF_CACHE = None
+    return _AS_OF_CACHE
 
 
 def _eff_age_at(age: float, report_date: Any) -> tuple[float, date | None, str | None]:
@@ -46,7 +71,12 @@ def _eff_age_at(age: float, report_date: Any) -> tuple[float, date | None, str |
     today = datetime.now(timezone.utc).date()
     if rd_date > today:
         return age, rd_date, "future"
-    yrs_since = (today - rd_date).days / 365.25
+    # P2-03（2026-08-18）：基准日从运行时 today 改为数据集 as_of（age_years 快照日）——
+    # yrs_since 可正可负：基线采样（rd <= as_of）年龄自快照回退；upsert 采样
+    # （as_of < rd <= today，晚于基线属正常）年龄自快照向前生长。此前 (today - rd)
+    # 会把"基准日至今"的漂移一并扣掉，部署越久 age_at_report 低估越严重。
+    ref = _dataset_as_of() or today
+    yrs_since = (ref - rd_date).days / 365.25
     return max(0.0, age - yrs_since), rd_date, None
 
 
@@ -169,9 +199,13 @@ def build_trend(
     latest = points[-1]["value"] if points else None
     previous = points[-2]["value"] if len(points) >= 2 else None
     delta_abs = round(latest - previous, 4) if previous is not None else None
+    # P2-04（2026-08-18）：delta_pct 与 trend_code 同口径 epsilon——此前仅判
+    # `previous != 0`（精确判零），previous≈0（如 1e-12）时 delta_pct 输出天文数字
+    # （+1e14%）而 direction 判 flat，内部数据状态矛盾（报告层展示 delta_pct 会
+    # 误导）。abs(previous) < _EPSILON 一律 delta_pct=None（同 trend_code 持平口径）。
     delta_pct = (
         round((latest - previous) / abs(previous) * 100.0, 2)
-        if previous not in (None, 0)
+        if previous is not None and abs(previous) >= _EPSILON
         else None
     )
     # N-AGE-1：趋势级参考带用最新采样点的采样时年龄（与最新 status 口径一致）

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from typing import Any, Optional
 
@@ -47,26 +48,43 @@ def _invalid(exc):
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")  # C2（2026-08-15）：生产 stdout 可采集
-    # v3.0 启动自检（唯一后端 = Tablestore）：验证 OTS 连通性。
-    # P1-9 修复（2026-08-13）：**自检失败 fail-fast 退出（非零码）**——此前仅打日志
-    # 继续 mcp.run()，部署后"服务活着但每个工具 INTERNAL_ERROR"（比启动失败更难发现，
-    # 医疗数据读写全挂）。现在自检失败 → stderr 提示 + SystemExit(1)，魔搭/HAIP 部署
-    # 立即暴露，不静默带病运行。
-    try:
-        from .repository import TablestoreRepository
+    # P1-01（2026-08-18）：启动自检按后端条件分支——本地 JSON 开发模式
+    # （A207_STORAGE_BACKEND=json）仅做开发模式护栏自检（A207_ACCEPT_DEV_STORAGE=1），
+    # **不校验 OTS 连接参数**（此前无条件 Tablestore 自检，JSON 模式本地启动直接
+    # SystemExit(1)，开发闭环失败）；生产/Tablestore 模式维持 OTS 连通性自检。
+    from .repository import STORAGE_BACKEND_ENV, ensure_json_backend_allowed
 
-        repo = TablestoreRepository()
-        tables = repo._get_client().list_table()
-        logger.info("[ots-selfcheck] OK 已连通表格存储，表=%s", sorted(tables))
-    except Exception as exc:  # noqa: BLE001 - 自检失败必须阻断启动（fail-fast）
-        logger.error("[ots-selfcheck] FAIL 无法连接表格存储：%s: %s",
-                     type(exc).__name__, str(exc)[:200])
-        # N-LOG-1（2026-08-14）：冗余 stderr print 并入 logger.error（默认输出
-        # 到 stderr，统一采集口径）——此前 logger.error 已打，print 仅重复。
-        logger.error(
-            "[ots-selfcheck] FAIL 无法连接表格存储（%s）。检查 A207_OTS_* "
-            "环境变量与网络后重试；服务未启动。", type(exc).__name__)
-        raise SystemExit(1) from exc
+    backend = os.environ.get(STORAGE_BACKEND_ENV, "tablestore").strip().lower()
+    if backend not in ("tablestore", "json"):
+        # P2-02（2026-08-18）：未知后端 fail-fast（与 get_repository 同口径）——
+        # 此前任意非 "json" 值静默走 Tablestore，拼写错误（如 jsno）带病运行。
+        logger.error("[selfcheck] FAIL A207_STORAGE_BACKEND=%r 非法（仅支持 "
+                     "tablestore/json），服务未启动。", backend)
+        raise SystemExit(1)
+    if backend == "json":
+        ensure_json_backend_allowed()  # 未显式确认 A207_ACCEPT_DEV_STORAGE=1 即抛（fail-closed）
+        logger.info("[selfcheck] OK 本地 JSON 开发模式（A207_STORAGE_BACKEND=json），跳过 OTS 自检")
+    else:
+        # v3.0 启动自检（生产后端 = Tablestore）：验证 OTS 连通性。
+        # P1-9 修复（2026-08-13）：**自检失败 fail-fast 退出（非零码）**——此前仅打日志
+        # 继续 mcp.run()，部署后"服务活着但每个工具 INTERNAL_ERROR"（比启动失败更难发现，
+        # 医疗数据读写全挂）。现在自检失败 → stderr 提示 + SystemExit(1)，魔搭/HAIP 部署
+        # 立即暴露，不静默带病运行。
+        try:
+            from .repository import TablestoreRepository
+
+            repo = TablestoreRepository()
+            tables = repo._get_client().list_table()
+            logger.info("[ots-selfcheck] OK 已连通表格存储，表=%s", sorted(tables))
+        except Exception as exc:  # noqa: BLE001 - 自检失败必须阻断启动（fail-fast）
+            logger.error("[ots-selfcheck] FAIL 无法连接表格存储：%s: %s",
+                         type(exc).__name__, str(exc)[:200])
+            # N-LOG-1（2026-08-14）：冗余 stderr print 并入 logger.error（默认输出
+            # 到 stderr，统一采集口径）——此前 logger.error 已打，print 仅重复。
+            logger.error(
+                "[ots-selfcheck] FAIL 无法连接表格存储（%s）。检查 A207_OTS_* "
+                "环境变量与网络后重试；服务未启动。", type(exc).__name__)
+            raise SystemExit(1) from exc
     mcp.run()
 
 

@@ -247,7 +247,15 @@ class LocalJsonRepository:
         return len(records)
 
     def known_lis_patient_ids(self) -> list[str]:
-        return [p["patient_id"] for p in _his.load_dataset().get("patients", [])]
+        # P2-01（2026-08-18）：契约统一为"LIS 覆盖患者 = 基线 ∪ 写库"——此前返回
+        # HIS 全部患者（含无化验者），与 Tablestore 端"仅扫 TABLE_LABS"口径不一致
+        # （两数据库模式下 list_known_patients 结果不同，跨包联调核对失真）。
+        from . import store as _store
+
+        base = {p["patient_id"] for p in _store.load_dataset().get("patients", [])}
+        upserted = {r.get("patient_id") for r in self._load_records()
+                    if isinstance(r.get("patient_id"), str)}
+        return sorted(base | upserted)
 
 
 class TablestoreRepository(TablestoreBase):
@@ -457,8 +465,13 @@ class TablestoreRepository(TablestoreBase):
         return len(rows)
 
     def known_lis_patient_ids(self) -> list[str]:
-        rows = self._range_all(TABLE_LABS, ["patient_id", "sample_id"])
-        return sorted({item["pk"]["patient_id"] for item in rows})
+        # P2-01（2026-08-18）：基线 + 写库**双表并集**（契约与 LocalJson 端一致）——
+        # 此前仅扫 TABLE_LABS，纯写库患者（upsert 新患者）漏列，两后端口径不一致。
+        ids: set[str] = set()
+        for table in (TABLE_LABS, TABLE_LABS_STORE):
+            for item in self._range_all(table, ["patient_id", "sample_id"]):
+                ids.add(item["pk"]["patient_id"])
+        return sorted(ids)
 
 
 def ensure_tablestore_tables() -> None:
@@ -477,6 +490,12 @@ def get_repository() -> ClinicalDataRepository:
     C3 修复（2026-08-14）：实例按 backend 缓存（double-checked locking）——此前每请求
     新建 TablestoreRepository（每请求新建 OTSClient 连接池），注释"单例"失实。"""
     backend = os.environ.get(STORAGE_BACKEND_ENV, "tablestore").strip().lower()
+    if backend not in ("tablestore", "json"):
+        # P2-02（2026-08-18）：未知后端 fail-fast——此前任意非 "json" 值（如拼错的
+        # "jsno"）静默走 Tablestore，生产语义漂移且运维无从发现；白名单显式校验。
+        raise RuntimeError(
+            f"A207_STORAGE_BACKEND={backend!r} 非法：仅支持 'tablestore'（生产）/ "
+            f"'json'（本地开发，需 A207_ACCEPT_DEV_STORAGE=1），拒绝启动")
     if backend == "json":
         # 生产护栏（2026-08-15）：json 后端仅限显式确认（A207_ACCEPT_DEV_STORAGE=1）
         ensure_json_backend_allowed()  # 未确认即抛 RuntimeError（fail-closed）

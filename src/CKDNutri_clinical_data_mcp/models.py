@@ -50,6 +50,12 @@ class LabResultIn(_Strict):
     report_date: date
     sample_id: str | None = None
     specimen: str | None = None
+    # P1-03（2026-08-18）：采样精确时间（可空）——无显式 sample_id 时确定性幂等键
+    # 纳入 specimen_time：同日两次完全同值的**真实**采样（不同采集时刻）不再被
+    # 确定性 ID 误判为"重复请求"吞掉；上游重试（同 specimen_time 同值）仍幂等命中。
+    # 缺省时维持既有确定性键（重试防重复），此时"同日同值且无采样时间"的重样仍会
+    # 撞键——建议上游优先提供 sample_id/accession_id 或 specimen_time（见 P1-03 文档）。
+    specimen_time: datetime | None = None
 
     # 契约单位字段
     scr_umol_L: float | None = Field(default=None, ge=0, le=3000)

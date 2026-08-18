@@ -89,15 +89,24 @@ def _upsert_units():
     assert any("scr_mg_dL" in c for c in res["data"]["unit_conversions"])
 
 
-@check("upsert / 契约字段与别名同时给出时以契约字段为准")
+@check("upsert / 契约字段与别名同时给出：换算一致放行，矛盾拒绝（P1-04）")
 def _upsert_conflict():
+    # P1-04（2026-08-18）：双单位并存必须换算一致——此前直接以契约字段为准，
+    # 矛盾值（如 scr_umol_L=200 与 scr_mg_dL=9.9→875.16）静默写错；现矛盾 → INVALID_INPUT。
     with as_caller("doctor_assistant"):
-        res = core.upsert_lab_result(
+        bad = core.upsert_lab_result(
             "P0015", {"report_date": _TODAY, "scr_umol_L": 200.0, "scr_mg_dL": 9.9},
             write_mode=False,
         )
-    assert res["ok"] is True, res
-    assert any("以契约字段" in c for c in res["data"]["unit_conversions"])
+    assert bad["ok"] is False and bad["error"] == "INVALID_INPUT", bad
+    # 一致（2.0 mg/dL = 176.8 umol/L）→ 放行并标注换算一致
+    with as_caller("doctor_assistant"):
+        good = core.upsert_lab_result(
+            "P0015", {"report_date": _TODAY, "scr_umol_L": 176.8, "scr_mg_dL": 2.0},
+            write_mode=False,
+        )
+    assert good["ok"] is True, good
+    assert any("换算一致" in c for c in good["data"]["unit_conversions"]), good
 
 
 @check("upsert / 新值命中危急阈值时给出通知动作")

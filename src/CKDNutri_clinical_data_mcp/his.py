@@ -152,6 +152,35 @@ def _load_guardian_tokens() -> dict[str, Any]:
         raise RuntimeError(
             f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 数据类型错误：期望 dict，"
             f"实际为 {type(data).__name__}，拒绝加载")
+    # P2-06（2026-08-18）：逐条目 Schema 校验（fail-closed）——此前仅校验顶层 dict，
+    # 条目 token 非 str / expires_at 垃圾串可静默载入（_token_expired 解析失败归过期、
+    # a207_policy 校验路径对损坏条目的行为不透明）；损坏条目直接拒绝加载，防"部分
+    # 条目损坏 → 静默失效"。issued_at/issued_by 宽松（兼容历史遗留条目缺字段）。
+    for pid, entry in data.items():
+        if not isinstance(pid, str):
+            raise RuntimeError(
+                f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 条目键 {pid!r} 非字符串，拒绝加载")
+        try:
+            validate_patient_id(pid)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 条目 patient_id={pid!r} 非法，"
+                "拒绝加载") from exc
+        if not isinstance(entry, dict) or not isinstance(entry.get("token"), str) \
+                or not entry["token"].strip():
+            raise RuntimeError(
+                f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 条目 {pid} token 缺失/类型错误，"
+                "拒绝加载")
+        for tkey in ("issued_at", "expires_at"):
+            raw = entry.get(tkey)
+            if raw is None:
+                continue
+            try:
+                datetime.fromisoformat(str(raw))
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 条目 {pid} {tkey}={raw!r} "
+                    "非合法时间，拒绝加载") from exc
     return data
 
 
