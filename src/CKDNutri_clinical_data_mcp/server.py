@@ -76,6 +76,13 @@ def main():
             repo = TablestoreRepository()
             tables = repo._get_client().list_table()
             logger.info("[ots-selfcheck] OK 已连通表格存储，表=%s", sorted(tables))
+            # D4（2026-08-18）：部署即初始化缺失表（幂等）——此前 ensure_tablestore_tables
+            # 仅 migrate_tablestore.py 手动调用，main() 不建表：魔搭新实例部署后表不存在，
+            # 读写全 INTERNAL_ERROR（P1_DATA）。ensure_tables 仅建缺失表（已存在跳过），
+            # 不影响已建表/存量数据。
+            from .repository import ensure_tablestore_tables
+
+            ensure_tablestore_tables()
         except Exception as exc:  # noqa: BLE001 - 自检失败必须阻断启动（fail-fast）
             logger.error("[ots-selfcheck] FAIL 无法连接表格存储：%s: %s",
                          type(exc).__name__, str(exc)[:200])
