@@ -18,7 +18,8 @@ from random import Random
 from typing import Any
 
 try:
-    from . import builders, reference as ref
+    from . import builders
+    from . import reference as ref
 except ImportError:  # 以脚本方式直接运行
     import builders  # type: ignore[no-redef]
     import reference as ref  # type: ignore[no-redef]

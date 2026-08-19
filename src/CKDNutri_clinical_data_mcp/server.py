@@ -4,15 +4,12 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-
-from typing import Any, Optional
-
-from fastmcp import FastMCP
+from typing import Any
 
 from a207_policy import translate_error
+from fastmcp import FastMCP
 
 # BUG-55（2026-08-12）：函数拆分到 his.py 后，server 导入未同步——get_diagnosis /
 # get_patient_profile / get_nutrition_ceiling / list_patients / verify_guardian_binding
@@ -20,8 +17,8 @@ from a207_policy import translate_error
 # 按真实模块归属拆分导入。
 from .core import (
     get_critical_values,
-    get_labs,
     get_lab_trend,
+    get_labs,
     list_known_patients,
     upsert_lab_result,
 )
@@ -83,7 +80,7 @@ def main():
             from .repository import ensure_tablestore_tables
 
             ensure_tablestore_tables()
-        except Exception as exc:  # noqa: BLE001 - 自检失败必须阻断启动（fail-fast）
+        except Exception as exc:
             logger.error("[ots-selfcheck] FAIL 无法连接表格存储：%s: %s",
                          type(exc).__name__, str(exc)[:200])
             # N-LOG-1（2026-08-14）：冗余 stderr print 并入 logger.error（默认输出
@@ -98,7 +95,7 @@ def main():
 # ---- M1: 患者主索引 ----
 
 @mcp.tool
-def get_patient_profile_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
+def get_patient_profile_tool(patient_id: str, guardian_token: str | None = None) -> dict[str, Any]:
     """查患儿完整档案（人口学+诊断），家庭助手需携带 guardian_token。"""
     try:
         return get_patient_profile(patient_id, guardian_token)
@@ -107,7 +104,7 @@ def get_patient_profile_tool(patient_id: str, guardian_token: Optional[str] = No
 
 
 @mcp.tool
-def get_diagnosis_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
+def get_diagnosis_tool(patient_id: str, guardian_token: str | None = None) -> dict[str, Any]:
     """查确诊信息（CKD 分期/原发病/透析状态）。家庭助手需携带 guardian_token。"""
     try:
         return get_diagnosis(patient_id, guardian_token)
@@ -171,7 +168,7 @@ def list_known_patients_tool() -> dict[str, Any]:
 
 
 @mcp.tool
-def get_nutrition_ceiling_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
+def get_nutrition_ceiling_tool(patient_id: str, guardian_token: str | None = None) -> dict[str, Any]:
     """查营养上限设定。"""
     try:
         return get_nutrition_ceiling(patient_id, guardian_token)
@@ -182,7 +179,7 @@ def get_nutrition_ceiling_tool(patient_id: str, guardian_token: Optional[str] = 
 # ---- M2: 化验面板 ----
 
 @mcp.tool
-def get_labs_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
+def get_labs_tool(patient_id: str, guardian_token: str | None = None) -> dict[str, Any]:
     """查患儿化验面板（家长可见完整化验数值，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_labs(patient_id, guardian_token)
@@ -191,7 +188,7 @@ def get_labs_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict
 
 
 @mcp.tool
-def get_critical_values_tool(patient_id: str, guardian_token: Optional[str] = None) -> dict[str, Any]:
+def get_critical_values_tool(patient_id: str, guardian_token: str | None = None) -> dict[str, Any]:
     """查最新报告日危急值明细（家长可见命中明细，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_critical_values(patient_id, guardian_token)
@@ -201,7 +198,7 @@ def get_critical_values_tool(patient_id: str, guardian_token: Optional[str] = No
 
 @mcp.tool
 def get_lab_trend_tool(patient_id: str, analyte: str, window_days: int = None,
-                       guardian_token: Optional[str] = None) -> dict[str, Any]:
+                       guardian_token: str | None = None) -> dict[str, Any]:
     """查指定指标的时间趋势（家长可见完整数值趋势，知情权）。家长需携带 guardian_token 完成患儿绑定。"""
     try:
         return get_lab_trend(patient_id, analyte, window_days, guardian_token)
@@ -211,7 +208,11 @@ def get_lab_trend_tool(patient_id: str, analyte: str, window_days: int = None,
 
 @mcp.tool
 def upsert_lab_result_tool(patient_id: str, lab: dict, write_mode: bool = True) -> dict[str, Any]:
-    """写入化验数据。仅 CKD 临床助手。"""
+    """写入化验数据（insert-if-absent：相同 sample_id 不允许覆盖，医疗防篡改）。
+
+    仅 CKD 临床助手。未提供 sample_id 时由 patient+日期+采样时刻+指标集派生确定性
+    幂等 id——同值重试按幂等成功（不重复落行）；显式 sample_id 重复提交返回 CONFLICT。
+    """
     try:
         return upsert_lab_result(patient_id, lab, write_mode)
     except Exception as exc:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+
 os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 os.environ.setdefault("A207_ACCEPT_DEV_STORAGE", "1")  # 生产护栏（2026-08-15）：测试进程显式确认 json 后端为开发模式
 import shutil
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -34,8 +36,8 @@ if str(SRC) not in sys.path:
 # P0-1：模拟部署侧注入身份。缺失即 fail-closed，故测试必须显式注入。
 os.environ.setdefault("A207_CALLER", "doctor_assistant")
 
-from CKDNutri_clinical_data_mcp import repository as _repo_mod  # noqa: E402
-from CKDNutri_clinical_data_mcp import store  # noqa: E402
+from CKDNutri_clinical_data_mcp import repository as _repo_mod
+from CKDNutri_clinical_data_mcp import store
 
 # 基线数据随包内联（_labs_baseline.BASELINE），任意部署环境自包含加载；
 # 令牌库（guardian_tokens.json）隔离到临时目录，不污染仓库产物。
@@ -148,7 +150,7 @@ class FakeOtsClient:
 
     def get_range(self, table: str, direction: str, start, end, limit: int = 200):
         names = self._pk_names(table)
-        rows = [_FakeRow(list(zip(names, key)), attrs)
+        rows = [_FakeRow(list(zip(names, key, strict=True)), attrs)
                 for key, attrs in sorted(self.tables[table].items())]
         # #6（2026-08-15）：模拟主键前缀范围——storage._range_all 的 prefix 参数
         # 经 start/end 的 INF_MIN/INF_MAX 表达"该前缀段"；Fake 此前忽略边界返回
@@ -160,7 +162,7 @@ class FakeOtsClient:
             return v is INF_MIN or v is INF_MAX or v == INF_MIN or v == INF_MAX
 
         def _within(pk_row):
-            for (col, lo), (_, hi) in zip(start, end):
+            for (col, lo), (_, hi) in zip(start, end, strict=True):
                 if not _is_inf(lo) and pk_row.get(col) < lo:
                     return False
                 if not _is_inf(hi) and pk_row.get(col) > hi:

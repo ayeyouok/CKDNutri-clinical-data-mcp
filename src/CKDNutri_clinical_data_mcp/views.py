@@ -163,7 +163,7 @@ def linear_slope_per_30d(points: list[dict[str, Any]]) -> float | None:
     denom = sum((x - mean_x) ** 2 for x in xs)
     if denom == 0:
         return None
-    numer = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    numer = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True))
     return round(numer / denom * 30.0, 4)
 
 

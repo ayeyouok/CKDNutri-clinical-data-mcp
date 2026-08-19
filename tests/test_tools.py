@@ -10,7 +10,9 @@
 """
 
 from __future__ import annotations
+
 import os
+
 os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 os.environ.setdefault("A207_ACCEPT_DEV_STORAGE", "1")  # 生产护栏（2026-08-15）：测试进程显式确认 json 后端为开发模式
 
@@ -19,17 +21,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import harness  # noqa: E402  必须最先导入：切换数据目录后才能 import core
-
-import cases_read  # noqa: E402,F401
-import cases_write  # noqa: E402,F401
-
 # 十二审（2026-08-17）：pytest 收集（CI 假绿阻断修复）——@check 用例在 import 时
 # 已以 test_ 前缀注册到 cases_read/cases_write 模块全局，但 pytest 只收集
 # test_*.py 文件（cases_*.py 不匹配默认 python_files 模式）。把两模块的 test_*
 # 成员转发到本模块，pytest 收集 test_tools.py 时一并收集全部 @check 用例。
 # 直跑模式（python test_tools.py → main() → harness.report()）不受影响。
 import types as _types
+
+import cases_read
+import cases_write
+import harness
 
 for _mod in (cases_read, cases_write):
     for _n, _o in vars(_mod).items():

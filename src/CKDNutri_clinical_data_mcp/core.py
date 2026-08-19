@@ -8,32 +8,31 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 import hashlib
 import json
+from datetime import date, datetime, timezone
 from typing import Any
-from uuid import uuid4
-
-from pydantic import ValidationError
 
 from a207_policy import (
-    ConflictError,
     LIS_CRITICAL_CHANNEL,
-    PARENT_ROLE,
-    PARENT_EQUIVALENT_ROLES,
     LIS_READ_FULL,
     LIS_READ_LIMITED,
+    PARENT_EQUIVALENT_ROLES,
+    ConflictError,
     get_caller,
 )
+from pydantic import ValidationError
+
 from .errors import fail, forbidden, invalid, no_data, not_found, patient_context
-from .models import LabResultIn, PatientQuery, TrendQuery, UpsertRequest
 from .his import (
     COHORT_CALLERS,
     _guard_access,
     _guard_guardian,
 )
+from .models import LabResultIn, PatientQuery, TrendQuery, UpsertRequest
 from .reference import ANALYTES, UNIT_ALIASES, critical_hits
 from .views import build_trend, decorate_panel
+
 
 # v2.4：业务层数据访问统一走 repository（双后端），不再直连 store 文件层。
 def _repo():
@@ -156,18 +155,21 @@ def get_critical_values(
     # P1-4（2026-08-18）：危急扫描从"仅最新一次采样"扩为"最新报告日全部采样"。
     # 此前 latest = panels[-1]（同日多采样取 sample_id 最大者），同日较早采样的危急
     # 值（如晨 K=7.0、午后复查 K=5.0 正常）被漏扫，通知链路静默不触发——医疗安全缺口。
-    # 现取最新报告日的全部面板做危急扫描（按指标去重合并），不漏同日任一采样；
-    # 不扫历史面板（不把旧危急误报为当前危急）。
+    # 现取最新报告日的全部面板做危急扫描，不漏同日任一采样；不扫历史面板（不把旧
+    # 危急误报为当前危急）。
+    # 审查 P1-NEW-02（2026-08-19）：**移除同日 analyte 去重**——此前
+    # `if analyte not in _seen_analytes` 对同日同指标多次危急只保留先遍历到的那个
+    # （保留哪个取决于面板顺序，P1-NEW-01 修复前是 sample_id hash 序），08:00
+    # K=7.0 / 10:00 K=6.8 / 14:00 K=6.6 三次真实危急只留一条，危急历史证据丢失。
+    # 现返回当天每个采样的全部 critical hit（同日同指标多条全保留）；通知链路只
+    # 消费"是否存在危急"（NOTIFY_HINT），不逐条通知，不产生刷屏。
     latest_date = panels[-1]["report_date"]
     same_day = [p for p in panels if p["report_date"] == latest_date]
-    latest = panels[-1]  # 仅用于 report_date/sample_id 展示（最新采样）
+    latest = panels[-1]  # 仅用于 report_date/sample_id 展示（P1-NEW-01 排序修复后=真实最新采样）
     hits: list[dict[str, object]] = []
-    _seen_analytes: set[str] = set()
     for _p in same_day:
         for _h in critical_hits(_p["values"]):
-            if _h["analyte"] not in _seen_analytes:
-                _seen_analytes.add(_h["analyte"])
-                hits.append(_h)
+            hits.append(_h)
     # 2026-08-13（用户决策）：危急值明细对家长可见（家长知情权；现实中医院会主动
     # 告知危急值）。家长分支仍强制 guardian_token（防跨患者读取），但不落
     # CRITICAL_CHANNEL 通知链路（通知是 doctor/risk_warning 的职责）。
@@ -355,9 +357,16 @@ def _normalize(lab: LabResultIn) -> tuple[dict[str, float], list[str]]:
         if target in values:
             # P1-04（2026-08-18）：双单位并存必须**换算一致**——此前仅记转换说明、
             # 直接以契约字段为准，契约值与别名换算值矛盾时（如 scr_umol_L=100 与
-            # scr_mg_dL=20 → 1768）静默写入错误值。容差 = 1% 相对 + 0.05 绝对
-            # （容忍调用方对别名值的四舍五入，如 1.13mg/dL=99.9 与 100 视为一致）。
-            tolerance = max(0.05, abs(values[target]) * 0.01)
+            # scr_mg_dL=20 → 1768）静默写入错误值。
+            # 审查 P2-03（2026-08-19）：容差重构——换算本身是精确乘法（×88.4 等），
+            # 容差只需容忍调用方舍入，且不能误拒合法取整：① 相对项 1% → **0.1%**
+            # （旧 1% 在高值下过宽：scr=3000 µmol/L 允许 ±30，可放过真实口径冲突，
+            # 如 3000 vs 2930 判一致；0.1% = ±3 足够容纳取整）；② 绝对下限按**目标
+            # 单位精度**分类——整数单位（_umol_L/_g_L/_mg_L）取整误差 ±0.5，下限
+            # 0.5（否则 177 µmol/L vs 2.0 mg/dL→176.8 差 0.2 被 0.1% 相对 0.177 误拒）；
+            # 小数单位（mmol_L 等两位小数）下限 0.05 不变。
+            _abs_tol = 0.5 if str(target).endswith(("_umol_L", "_g_L", "_mg_L")) else 0.05
+            tolerance = max(_abs_tol, abs(values[target]) * 0.001)
             if abs(values[target] - converted) > tolerance:
                 raise ValueError(
                     f"{alias}={raw[alias]} 换算后 {target}={converted} 与契约字段 "
@@ -383,6 +392,12 @@ def upsert_lab_result(
     write_mode: bool = True,
 ) -> dict[str, Any]:
     """新增一条采样。写权仅 doctor_assistant（MX-3），越权 403。
+
+    ⚠️ 语义说明（审查 P2-04，2026-08-19）：工具名为历史遗留（"upsert"），实际行为是
+    **insert-if-absent**——相同 `sample_id` **不允许覆盖**（医疗检验结果防篡改，
+    设计如此）：显式 sample_id 重复提交返回 CONFLICT；确定性幂等 id（未提供
+    sample_id 时由 patient+日期+specimen_time+指标集派生）重复提交按幂等成功
+    （idempotent_hit=true），不会更新已存在数据。不要把本工具当作"可覆盖更新"使用。
 
     write_mode=False 时只做校验与影响面预演，不落盘（回滚模式）。
     成功返回 recommend_reevaluate=true，提示编排层强制触发 M8 重评。
@@ -458,7 +473,7 @@ def upsert_lab_result(
 
     try:
         store_size = _repo().append_lab_record(record) if request.write_mode else None
-    except ConflictError as exc:
+    except ConflictError:
         # 九审（2026-08-16）：repository 统一抛 ConflictError（替代字符串匹配）。
         # S-2：确定性 id 重试命中已存在（并发保护抛"sample_id 已存在"）→ 幂等成功，
         # 不落两行、不把重试当错误卡死（LIS 重试收到成功即停止）。

@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
 """CD-S1~CD-B4 回归测试（2026-08-14 修复后固化）。pytest + 直接运行双模式。"""
 import os
+
 os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 os.environ.setdefault("A207_ACCEPT_DEV_STORAGE", "1")  # 生产护栏（2026-08-15）：测试进程显式确认 json 后端为开发模式
 import sys
@@ -16,7 +16,7 @@ os.environ.setdefault("A207_CALLER", "doctor_assistant")
 
 def test_cd_b1_alias_ceiling_aligned():
     """CD-B1：别名 mg/dL 上限与契约 mmol/L 口径一致（p 25→24 等，无陷阱带）。"""
-    from CKDNutri_clinical_data_mcp.models import UpsertRequest, LabResultIn
+    from CKDNutri_clinical_data_mcp.models import LabResultIn, UpsertRequest
 
     # 归一化后超契约的别名值应在模型层就被拒（不再是"放行→归一化拒绝"）
     # p_mg_dL=25（归一化 8.07 > 契约 8）→ 模型层应拒绝（pydantic ValidationError）
@@ -37,7 +37,6 @@ def test_cd_b3_recorded_at_roundtrip():
     from CKDNutri_clinical_data_mcp import repository as repo
 
     # 序列化保留
-    tab = repo.TablestoreRepository
     src = repo.TablestoreRepository.__dict__["append_lab_record"]
     import inspect
     code = inspect.getsource(src)
@@ -70,7 +69,6 @@ def test_n_age1_trend_uses_sampling_age():
     当前 8 岁（school 27-62）、采样于 3 年前（当时 5 岁，preschool 20-42），
     scr=50：preschool → high；school → normal。修复前统一用当前年龄误判 normal。
     """
-    from datetime import date
 
     from CKDNutri_clinical_data_mcp import views
 

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import ast
-import json
 import os
+
 os.environ.setdefault("A207_ENV", "test")  # N-SEC-1（2026-08-14）：测试进程显式声明测试环境（守卫 fail-closed 默认拒绝）
 os.environ.setdefault("A207_ACCEPT_DEV_STORAGE", "1")  # 生产护栏（2026-08-15）：测试进程显式确认 json 后端为开发模式
 import re
-import sys
 from datetime import date
 
 from a207_policy import CallerUnknown, as_caller
@@ -248,7 +247,7 @@ def _server_no_caller_param():
 @check("零跨包引用：未 import 任何其他 a207-* 包")
 def _no_cross_import():
     # Plan A：a207_policy 是统一策略共享包（非领域 MCP），允许引用。
-    pattern = re.compile(r"(?:^|\s)(?:import|from)\s+a207_(?!lis_mcp|policy)", re.M)
+    pattern = re.compile(r"(?:^|\s)(?:import|from)\s+a207_(?!lis_mcp|policy)", re.MULTILINE)
     offenders = [
         str(p.relative_to(PKG_ROOT))
         for p in PKG_ROOT.rglob("*.py")
@@ -260,7 +259,7 @@ def _no_cross_import():
 
 @check("纯逻辑层不 import fastmcp（无 fastmcp 亦可单测）")
 def _no_fastmcp():
-    pattern = re.compile(r"(?:^|\s)(?:import|from)\s+fastmcp\b", re.M)
+    pattern = re.compile(r"(?:^|\s)(?:import|from)\s+fastmcp\b", re.MULTILINE)
     pure = ("core.py", "models.py", "views.py", "store.py", "reference.py",
             "errors.py", "__init__.py")
     offenders = [
@@ -353,7 +352,6 @@ def _b1_dup_sample_id_rejected():
         assert "已存在" in str(exc), exc
     assert fake_labs_store_count() == before, "重复提交产生了写入副作用"
     # 原始记录未被覆盖：k 仍是 5.1（走 repository 原始面板，非 decorated results）
-    from CKDNutri_clinical_data_mcp.repository import get_repository
 
     for p in get_repository().get_panels("P0013"):
         if p["sample_id"] == "P0013-U-test1":

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """P1 临床数据域 DAO 层（默认生产后端 = 阿里云表格存储 Tablestore；A207_STORAGE_BACKEND=json 为受控开发模式）。
 
 设计目标：
@@ -34,15 +33,42 @@ import json
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from a207_policy import ConflictError, atomic_write_json, resolve_state_path
-from a207_policy.storage import TablestoreBase, ensure_json_backend_allowed  # 2026-08-15：共享 Tablestore 基础设施
+from a207_policy.storage import (  # 2026-08-15：共享 Tablestore 基础设施
+    TablestoreBase,
+    ensure_json_backend_allowed,
+)
 
 from . import his as _his
 
 logger = logging.getLogger("CKDNutri-clinical-data-mcp.repository")
+
+
+def _panel_sort_key(p: dict[str, Any]) -> tuple:
+    """化验面板排序键：报告日 → 采样时刻 → sample_id。
+
+    审查 P1-NEW-01（2026-08-19）：此前按 (report_date, sample_id) 排序——sample_id
+    是 SHA1 截断，**与采样时间无排序关系**；同日多采样（晨 K=7.0 / 午后 K=5.0）的
+    "最新"判定取决于 hash 序，get_critical_values 的 latest 展示、build_trend 的
+    previous/latest、同日 critical 去重顺序全部可能建立在错误时间序上。
+    现按 specimen_time（解析为 UTC 时间戳，跨时区同刻同值）排序；缺失 specimen_time
+    （基线/旧数据）视为当天最早（-inf，保守不抢占明确时刻）；同刻再按 sample_id
+    稳定排序（确定性，与输入无关）。
+    """
+    st = p.get("specimen_time")
+    if st:
+        try:
+            dt = datetime.fromisoformat(str(st).replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc)
+            return (p["report_date"], dt.timestamp(), p.get("sample_id", ""))
+        except (TypeError, ValueError):
+            pass
+    return (p["report_date"], float("-inf"), p.get("sample_id", ""))
 
 # LocalJson 后端写库 RMW 并发保护（单进程内串行化；Tablestore 端行级原子无需）
 _FILE_LOCK = threading.Lock()
@@ -50,7 +76,7 @@ _FILE_LOCK = threading.Lock()
 # C3 修复（2026-08-14）：repository 实例缓存（按 backend 缓存，对齐 care/nutrition 单例）——
 # 此前 get_repository() 每请求新建实例（Tablestore 端每请求新建 OTSClient 连接池），
 # repository.py:267 注释自称"单例"失实。缓存实例避免每请求重握手。
-_REPO_CACHE: dict[str, "ClinicalDataRepository"] = {}
+_REPO_CACHE: dict[str, ClinicalDataRepository] = {}
 _REPO_LOCK = threading.Lock()
 
 # Tablestore 连接参数的环境变量名（与 a207-policy 的 env 注入约定一致）
@@ -90,7 +116,12 @@ class ClinicalDataRepository(Protocol):
         ...
 
     def list_patients(self, criteria: dict[str, Any]) -> list[dict[str, Any]]:
-        """按维度筛选患者队列（age_band / ckd_stage / dialysis 等）。"""
+        """按维度筛选患者队列（age_band / ckd_stage / dialysis 等）。
+
+        ⚠️ 规模契约（审查 P2-05，2026-08-19）：本接口为**全表扫描 + 内存筛选**，
+        仅适合小规模静态患者索引（当前 36 患儿量级）。若生产规模扩大（千/万级），
+        必须引入 ckd_stage / age_band / dialysis 二级索引或分片查询，勿直接扩容使用。
+        """
         ...
 
     def all_patient_ids(self) -> list[str]:
@@ -99,7 +130,12 @@ class ClinicalDataRepository(Protocol):
 
     # ---- LIS 化验数据 ----
     def get_panels(self, patient_id: str) -> list[dict[str, Any]]:
-        """基线 + 写库合并后的化验面板（按报告日期升序）。"""
+        """基线 + 写库合并后的化验面板（按报告日 → 采样时刻 → sample_id 升序）。
+
+        审查 P1-NEW-01（2026-08-19）：排序键由 (report_date, sample_id) 升级为
+        (report_date, specimen_time, sample_id)——sample_id 是 SHA1 截断与采样时刻
+        无排序关系，同日多采样的"最新"判定必须依据 specimen_time（缺失视为当天最早）。
+        """
         ...
 
     def append_lab_record(self, record: dict[str, Any]) -> int:
@@ -221,13 +257,16 @@ class LocalJsonRepository:
                 "sample_id": sid,
                 "report_date": record["report_date"],
                 "specimen": record.get("specimen"),
+                # 审查 P1-NEW-01（2026-08-19）：读回对称补 specimen_time（此前写库存了
+                # 但读回丢弃，同日多采样无法按真实采样时刻排序——见 _panel_sort_key）。
+                "specimen_time": record.get("specimen_time"),
                 "values": values,
                 "source": "upsert",
                 "recorded_by": record.get("recorded_by"),
                 # CD-B3：读回对称（Tablestore 序列化已补，双后端形状一致）
                 "recorded_at": record.get("recorded_at"),
             }
-        return sorted(by_sample.values(), key=lambda p: (p["report_date"], p["sample_id"]))
+        return sorted(by_sample.values(), key=_panel_sort_key)
 
     def append_lab_record(self, record: dict[str, Any]) -> int:
         with _FILE_LOCK:
@@ -410,6 +449,9 @@ class TablestoreRepository(TablestoreBase):
                     "sample_id": sid,
                     "report_date": attrs["report_date"],
                     "specimen": attrs.get("specimen"),
+                    # 审查 P1-NEW-01（2026-08-19）：读回对称补 specimen_time（写入端
+                    # append_lab_record 已补序列化）——见 _panel_sort_key 排序说明。
+                    "specimen_time": attrs.get("specimen_time"),
                     "values": values,
                     "recorded_by": attrs.get("recorded_by"),
                     # CD-B3：读回对称（序列化已补 recorded_at，双后端形状一致）
@@ -420,7 +462,8 @@ class TablestoreRepository(TablestoreBase):
                 if table == TABLE_LABS_STORE and src:
                     row["source"] = src
                 panels[sid] = row
-        return sorted(panels.values(), key=lambda p: (p["report_date"], p["sample_id"]))
+        # 审查 P1-NEW-01：排序键统一 _panel_sort_key（报告日 → specimen_time → sample_id）
+        return sorted(panels.values(), key=_panel_sort_key)
 
     def append_lab_record(self, record: dict[str, Any]) -> int:
         # LOW-6（2026-08-15）：延迟导入 OTSClientError（与 storage.py 同模式，
@@ -433,6 +476,11 @@ class TablestoreRepository(TablestoreBase):
         attrs = {
             "report_date": record.get("report_date"),
             "specimen": record.get("specimen"),
+            # 审查 P1-NEW-01（2026-08-19）：补 specimen_time 序列化——core 的
+            # upsert_lab_result 已在 record 携带 specimen_time，此前 Tablestore 端
+            # 丢弃该列（LocalJson 端全量保留），双后端数据形状不一致且同日多采样
+            # 无法按真实采样时刻排序（get_panels 读回对称补）。
+            "specimen_time": record.get("specimen_time"),
             "values": json.dumps(record.get("values", {}), ensure_ascii=False),
             "source": "upsert",
             "recorded_by": record.get("recorded_by"),
@@ -511,13 +559,13 @@ def get_repository() -> ClinicalDataRepository:
 
 
 __all__ = [
+    "STORAGE_BACKEND_ENV",
+    "TABLE_LABS",
+    "TABLE_LABS_STORE",
+    "TABLE_PATIENTS",
     "ClinicalDataRepository",
     "LocalJsonRepository",
     "TablestoreRepository",
     "ensure_tablestore_tables",
     "get_repository",
-    "STORAGE_BACKEND_ENV",
-    "TABLE_PATIENTS",
-    "TABLE_LABS",
-    "TABLE_LABS_STORE",
 ]

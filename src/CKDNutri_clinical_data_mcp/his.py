@@ -22,11 +22,11 @@ from typing import Any
 
 from a207_policy import (
     CLINICIAN_ONLY_FIELDS,
-    PARENT_ROLE,
-    PARENT_EQUIVALENT_ROLES,
     HIS_ALLOWED_FILTER_KEYS,
     HIS_COHORT,
     P1_PARENT_HIDDEN_FIELDS,
+    PARENT_EQUIVALENT_ROLES,
+    PARENT_ROLE,
     PermissionDenied,
     atomic_write_json,
     enforce_read,
@@ -36,6 +36,7 @@ from a207_policy import (
     validate_patient_id,
     verify_guardian_token,
 )
+
 
 # v2.4：业务层数据访问统一走 repository（双后端），不再直连 JSON 文件。
 # 延迟导入避免循环引用（repository 内部 import 本模块的筛选谓词）。
@@ -204,7 +205,6 @@ class _CrossProcessTokenLock:
     """跨进程互斥（文件锁）：Windows msvcrt / POSIX fcntl 双平台。"""
 
     def __enter__(self):
-        import os
 
         # #12（2026-08-15）：open 成功后加锁失败也要关闭句柄——此前 lock 抛异常
         # 时 _fh 泄漏（句柄不释放，重试多次会耗尽文件描述符）。
@@ -571,7 +571,7 @@ def verify_guardian_binding(patient_id: str, guardian_token: str) -> dict[str, A
     矩阵若对该 Tool 收紧将无法生效。家长矩阵为 ACCESS_READ，补闸后仍可正常调用。
     """
     # P0-1：身份必须由部署环境注入，未注入即 fail-closed；本接口的放行范围维持原状不收紧。
-    caller = get_caller()
+    get_caller()  # P0-1 身份校验副作用（未注入 A207_CALLER 抛 CallerUnknown）；返回值本函数未用
     denied = _guard_access("verify_guardian_binding")
     if denied:
         return denied

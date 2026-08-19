@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """JSON → Tablestore 一次性历史数据迁移脚本（幂等，可重跑）。
 
 v3.0（2026-08-13）：运行时 JSON 存储已删除（唯一后端 Tablestore），本脚本仅用于
@@ -74,6 +73,33 @@ def _load_labs_store() -> list[dict[str, Any]]:
     return records if isinstance(records, list) else []
 
 
+def _verify_row_consistent(record: dict[str, Any], row: dict[str, Any]) -> str | None:
+    """迁移冲突时校验已存在行与源 JSON 记录是否一致。
+
+    审查 P2-02（2026-08-19）：此前冲突直接按"已迁移"跳过、不验证内容——若线上行
+    被修改/污染（如 K=4.2 → K=9.9），迁移静默认为"已完成"，源与目标不一致无人知晓。
+    对比核心业务字段（report_date / specimen / values）；values 在 Tablestore 为
+    JSON 字符串列，反序列化后比较。一致返回 None，不一致返回差异描述。
+    """
+    diffs: list[str] = []
+    for key in ("report_date", "specimen"):
+        src = record.get(key)
+        tgt = row.get(key)
+        if src != tgt:
+            diffs.append(f"{key}: 源={src!r} vs 目标={tgt!r}")
+    src_vals = record.get("values")
+    tgt_vals = row.get("values")
+    if isinstance(tgt_vals, str):
+        try:
+            tgt_vals = json.loads(tgt_vals)
+        except json.JSONDecodeError:
+            diffs.append("values: 目标行 JSON 损坏")
+            tgt_vals = None
+    if src_vals != tgt_vals:
+        diffs.append(f"values: 源={src_vals!r} vs 目标={tgt_vals!r}")
+    return "；".join(diffs) if diffs else None
+
+
 def migrate() -> dict[str, int]:
     """执行迁移，返回各表写入行数。"""
     ensure_tablestore_tables()
@@ -123,7 +149,20 @@ def migrate() -> dict[str, int]:
             # 此前 except RuntimeError 匹配不到 → 二次运行第一条即抛 ConflictError
             # 冒泡中断迁移，"可重跑补齐"承诺失效（幂等重跑测试场景）。
             if "已存在" in str(exc) or "sample_id" in str(exc):
-                store_skipped += 1
+                # 审查 P2-02（2026-08-19）：跳过前校验已存在行与源记录**内容一致**——
+                # 此前仅按错误串判断"已迁移"即跳过，线上行若被修改/污染（K=4.2→9.9）
+                # 迁移静默认为"已完成"（源与目标不一致无人知晓）。读回目标行对比：
+                # 一致 → skip（幂等重跑）；不一致 → fail-closed 中断并提示人工核对。
+                row = repo._get_row(TABLE_LABS_STORE,
+                                    repo._pk_lab(record.get("patient_id"), record.get("sample_id")))
+                conflict = _verify_row_consistent(record, row) if row is not None else "目标行不存在"
+                if conflict is None:
+                    store_skipped += 1
+                else:
+                    # 冲突是预期数据问题，切断原 ConflictError 链（B904：from None）
+                    raise RuntimeError(
+                        f"[migrate] 迁移冲突且目标行与源不一致（sample_id="
+                        f"{record.get('sample_id')}）：{conflict}——请人工核对后处理") from None
             else:
                 raise
     counts[TABLE_LABS_STORE] = store_rows
@@ -159,4 +198,4 @@ if __name__ == "__main__":
         migrate()
     except Exception as exc:  # noqa: BLE001
         logger.error("[migrate] 迁移失败：%s: %s", type(exc).__name__, exc)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
