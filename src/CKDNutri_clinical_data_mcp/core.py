@@ -90,6 +90,21 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
     if not panels:
         return no_data(query.patient_id)
 
+    # 审查（2026-08-19，clinical-data 审查 ⑤）：权限采用**明确允许**（fail-closed）——
+    # 旧逻辑 `if caller in READ_LIMITED: LIMITED; else: FULL` 对未配置角色 fall-open
+    # 到 FULL（以后新增角色忘记配置即意外获得全量医疗数据）。现显式三段：
+    # 明确 FULL → FULL；明确 LIMITED → LIMITED；**未配置 → 拒绝**。
+    if caller in READ_FULL:
+        return {
+            "ok": True,
+            "data": {
+                "patient_id": query.patient_id,
+                "data_scope": "full",
+                "context": patient_context(patient),
+                "panel_count": len(panels),
+                "panels": [decorate_panel(p, age, sex) for p in panels],
+            },
+        }
     if caller in READ_LIMITED:
         # 2026-08-13（用户决策）：家长可见完整化验数值（data_scope 标识 parent_full），
         # 与医生同构面板；临床判读不在此接口。
@@ -104,17 +119,8 @@ def get_labs(patient_id: str, guardian_token: str | None = None) -> dict[str, An
                 "note": "家长视图含化验原始数值（知情权）；临床判读（PEW/生长曲线等）不在此接口。",
             },
         }
-
-    return {
-        "ok": True,
-        "data": {
-            "patient_id": query.patient_id,
-            "data_scope": "full",
-            "context": patient_context(patient),
-            "panel_count": len(panels),
-            "panels": [decorate_panel(p, age, sex) for p in panels],
-        },
-    }
+    # 未明确配置视图角色 → 拒绝（fail-closed，不 fall-open 到 FULL）
+    return forbidden(caller, "get_labs")
 
 
 # --- 工具 2：get_critical_values --------------------------------------------
@@ -458,7 +464,11 @@ def upsert_lab_result(
         _st_key = _st.isoformat(timespec="seconds") if _st is not None else ""
         id_key = (f"{request.patient_id}|{request.lab.report_date.isoformat()}|{_st_key}|"
                   + json.dumps(_norm_vals, sort_keys=True, ensure_ascii=False))
-        sample_id = f"{request.patient_id}-S{hashlib.sha1(id_key.encode('utf-8')).hexdigest()[:8]}"
+        # 审查（2026-08-19，clinical-data 审查 ②）：确定性 sample_id 升级
+        # SHA-1[:8]（32 bit，长期 LIS 数据碰撞风险）→ **SHA-256[:16]（64 bit）**。
+        # 64 bit 在百万级同指标集记录下碰撞概率可忽略；LIS 上游提供真实
+        # sample_id/accession_id 时仍优先使用（本分支仅无显式 id 时触发）。
+        sample_id = f"{request.patient_id}-S{hashlib.sha256(id_key.encode('utf-8')).hexdigest()[:16]}"
     record = {
         "patient_id": request.patient_id,
         "sample_id": sample_id,

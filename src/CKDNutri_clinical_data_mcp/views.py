@@ -7,9 +7,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Any
 
+from ._business import business_today  # 2026-08-19（审查 ④）：统一业务日期单一事实源
 from .reference import (
     ANALYTES,
     STATUS_LABEL,
@@ -68,7 +69,8 @@ def _eff_age_at(age: float, report_date: Any) -> tuple[float, date | None, str |
         return age, None, None
     # L（2026-08-16，第七轮审查）：未来日期判断统一 UTC 业务日（date.today() 本地
     # naive 与全局 UTC 口径脱节，跨时区部署漂移）。
-    today = datetime.now(timezone.utc).date()
+    # 2026-08-19（审查 ④）：统一走 business_today()（全项目唯一"今天"定义）。
+    today = business_today()
     if rd_date > today:
         return age, rd_date, "future"
     # P2-03（2026-08-18）：基准日从运行时 today 改为数据集 as_of（age_years 快照日）——

@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from ._business import business_today  # 2026-08-19（审查 ④）：统一业务日期单一事实源
 
 PATIENT_ID_RE = re.compile(r"^P[0-9]{4,}$")
 
@@ -45,6 +47,17 @@ class LabResultIn(_Strict):
 
     契约字段用 pcp-schema 单位；带 _mg_dL / _g_dL 后缀的别名字段会在
     core 入口归一化，防止 Scr、P、Ca 的口径错配。
+
+    日期字段业务语义（2026-08-19 审查 ③，明确约定、系统不做猜测）：
+    - report_date = **LIS 报告业务日期**（YYYY-MM-DD，纯日历日）——报告/归档/时间线
+      归属用；允许与采样日不同（如次日出报告的检验）。不做"必须与 specimen_time 同一天"
+      的强制校验（LIS 实际业务允许跨日报告）。
+    - specimen_time = **实际采样时间**（datetime，可含时区；可空）——同日多采样排序、
+      确定性幂等键、危急值"最新"判定用。缺省时排序视为当天最早、幂等键不含时间分量
+      （同日同值真实重采样将撞键，建议上游优先提供）。
+    - 二者关系：specimen_time 是物理事实，report_date 是业务归属日期；系统**不要求**
+      二者同一天，也不从其中一个推导另一个。如需"报告签发时间"，另行扩展
+      reported_at 字段（当前未定义）。
     """
 
     report_date: date
@@ -101,10 +114,11 @@ class LabResultIn(_Strict):
         # C2（2026-08-15）："当天"统一用 UTC 业务日（date.today() 本地 naive，
         # 跨时区部署"未来日期"判断漂移——UTC+8 部署 00:00-08:00 会把本地今天的
         # 报告误判为未来）。
-        if self.report_date > datetime.now(timezone.utc).date():
+        # 2026-08-19（审查 ④）：统一走 business_today()（全项目唯一"今天"定义）。
+        if self.report_date > business_today():
             raise ValueError(
-                f"report_date {self.report_date.isoformat()} 晚于当前日期 "
-                f"{datetime.now(timezone.utc).date().isoformat()}，疑似未来数据，拒绝写入")
+                f"report_date {self.report_date.isoformat()} 晚于当前业务日期 "
+                f"{business_today().isoformat()}，疑似未来数据，拒绝写入")
         return self
 
 

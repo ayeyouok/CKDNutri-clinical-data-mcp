@@ -300,12 +300,13 @@ def _b1_uuid_sample_id():
         )
     assert res["ok"] is True, res
     sid = res["data"]["sample_id"]
-    # S-2（2026-08-15）：无显式 sample_id 时生成**确定性幂等哈希**（pid-S + 8 位
-    # sha1）——同日期同指标名-值 → 同 id（LIS 超时重试幂等，不落两行）；此前 uuid4
-    # 每次不同，重试同一化验落两行。格式：pid-S + 8 位十六进制。
+    # S-2（2026-08-15）：无显式 sample_id 时生成**确定性幂等哈希**（pid-S + 哈希
+    # 截断）——同日期同指标名-值 → 同 id（LIS 超时重试幂等，不落两行）；此前 uuid4
+    # 每次不同，重试同一化验落两行。格式：pid-S + 16 位十六进制（2026-08-19 审查 ②：
+    # SHA-1[:8]=32bit 升级 SHA-256[:16]=64bit，长期 LIS 数据降低碰撞风险）。
     assert sid.startswith("P0013-S"), sid
     tail = sid[len("P0013-S"):]
-    assert len(tail) == 8 and all(c in "0123456789abcdef" for c in tail), sid
+    assert len(tail) == 16 and all(c in "0123456789abcdef" for c in tail), sid
     # 同日期同值重试 → **同 id**（幂等，S-2 新增语义）
     with as_caller("doctor_assistant"):
         res1b = core.upsert_lab_result(
