@@ -27,6 +27,8 @@ from a207_policy import (
     P1_PARENT_HIDDEN_FIELDS,
     PARENT_EQUIVALENT_ROLES,
     PARENT_ROLE,
+    DEMO_PARENT_ROLE,
+    DEMO_ALLOWED_PATIENTS,
     PermissionDenied,
     atomic_write_json,
     enforce_read,
@@ -382,9 +384,17 @@ def load_dataset(force_reload: bool = False) -> dict[str, Any]:
 
 def _guard_guardian(caller: str, patient_id: str, guardian_token: str | None,
                     tool: str) -> dict[str, Any] | None:
-    """家长助手每次读取前必须通过绑定核验，缺 token 即拒绝，不给降级视图。"""
-    if caller != PARENT_ROLE:
-        return None
+    """家长每次读取前必须通过绑定核验；demo 家长等价身份免令牌但仅限演示患儿集合，
+    其余家长缺 token 即拒绝，不给降级视图。"""
+    if caller not in PARENT_EQUIVALENT_ROLES:
+        return None                      # 医生/风险管线：不进家长闸
+    if caller == DEMO_PARENT_ROLE:
+        # BUG-41（2026-08-20）修复：demo 身份此前被 `caller != PARENT_ROLE` 短路完全绕过
+        # 绑定（跨患儿越权）；现走免令牌分支，但须钉死到演示患儿集合。
+        if patient_id not in DEMO_ALLOWED_PATIENTS:
+            return _err("FORBIDDEN",
+                        f"demo 家长仅可访问演示患儿 {sorted(DEMO_ALLOWED_PATIENTS)}")
+        return None                      # 免令牌，但已钉范围
     if not guardian_token:
         return _err("GUARDIAN_UNVERIFIED",
                     f"caller=parent_assistant 调用 {tool} 必须携带 guardian_token")
