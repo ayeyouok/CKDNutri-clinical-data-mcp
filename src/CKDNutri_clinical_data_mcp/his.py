@@ -21,9 +21,11 @@ from pathlib import Path
 from typing import Any
 
 from a207_policy import (
+    CHILD_ROLE,
     CLINICIAN_ONLY_FIELDS,
     HIS_ALLOWED_FILTER_KEYS,
     HIS_COHORT,
+    P1_CHILD_READ_TOOLS,
     P1_PARENT_HIDDEN_FIELDS,
     PARENT_EQUIVALENT_ROLES,
     PARENT_ROLE,
@@ -34,6 +36,7 @@ from a207_policy import (
     enforce_read,
     enforce_write,
     get_caller,
+    get_child_patient_id,
     resolve_state_path,
     validate_patient_id,
     verify_guardian_token,
@@ -72,7 +75,16 @@ def _guard_access(tool: str, *, write: bool = False) -> dict[str, Any] | None:
 
     放行返回 None；越权抛 PermissionDenied，此处转成 P1 既有 FORBIDDEN 信封（契约不变）。
     家长 guardian_token 核验由 _guard_guardian 独立负责，本函数不处理。
+
+    2026-08-21：患儿身份读工具**白名单收窄**——child 仅可访问 P1_CHILD_READ_TOOLS
+    （如 get_patient_profile），其余 P1 读工具（get_labs/get_diagnosis 等）一律
+    FORBIDDEN（矩阵 P1×child=RL 是 MCP 级，本函数做工具级收口，一处改动全包生效）。
     """
+    caller = get_caller()
+    if not write and caller == CHILD_ROLE and tool not in P1_CHILD_READ_TOOLS:
+        return _err("FORBIDDEN",
+                    f"caller=child_assistant 仅可访问 "
+                    f"{sorted(P1_CHILD_READ_TOOLS)}（其余 P1 读工具一律拒绝）")
     try:
         if write:
             enforce_write(_MCP_NAME, tool)
@@ -386,6 +398,15 @@ def _guard_guardian(caller: str, patient_id: str, guardian_token: str | None,
                     tool: str) -> dict[str, Any] | None:
     """家长每次读取前必须通过绑定核验；demo 家长等价身份免令牌但仅限演示患儿集合，
     其余家长缺 token 即拒绝，不给降级视图。"""
+    if caller == CHILD_ROLE:
+        # 2026-08-21：患儿身份单实例绑单患儿（env A207_CHILD_PATIENT_ID，如 P0020）。
+        # 免令牌，但读写范围钉死绑定患儿——跨患儿一律 FORBIDDEN（fail-closed；
+        # 未设置 env 时 get_child_patient_id 抛 CallerUnknown 拒绝）。
+        bound = get_child_patient_id()
+        if patient_id != bound:
+            return _err("FORBIDDEN",
+                        f"child_assistant 仅可访问绑定患儿 {bound}，收到 patient_id={patient_id}")
+        return None
     if caller not in PARENT_EQUIVALENT_ROLES:
         return None                      # 医生/风险管线：不进家长闸
     if caller == DEMO_PARENT_ROLE:
@@ -434,7 +455,9 @@ def _scope_of(caller: str) -> str:
     # BUG-31（2026-08-12）：删除退役角色 nutritionist 分支（v2.3 阶段 0 已退役）。
     # 2026-08-17：家长受限视图扩展到 PARENT_EQUIVALENT_ROLES（家长 + 演示家长），
     # 其余（doctor/risk）全量。新增家长等价身份只需改 PARENT_EQUIVALENT_ROLES。
-    if caller in PARENT_EQUIVALENT_ROLES:
+    # 2026-08-21：患儿身份（child_assistant）同家长受限视图——只能看自己档案的
+    # RL 脱敏版（不含化验/判读），绝不落 full 全量视图。
+    if caller in PARENT_EQUIVALENT_ROLES or caller == CHILD_ROLE:
         return "limited_parent"
     return "full"
 
