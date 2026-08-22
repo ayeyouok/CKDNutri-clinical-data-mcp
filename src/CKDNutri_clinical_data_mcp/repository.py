@@ -466,9 +466,11 @@ class TablestoreRepository(TablestoreBase):
         return sorted(panels.values(), key=_panel_sort_key)
 
     def append_lab_record(self, record: dict[str, Any]) -> int:
-        # LOW-6（2026-08-15）：延迟导入 OTSClientError（与 storage.py 同模式，
+        # LOW-6（2026-08-15）：延迟导入 SDK 异常（与 storage.py 同模式，
         # 避免模块顶部依赖 SDK；SDK 缺失时仅 Tablestore 后端 fail-fast）
-        from tablestore import OTSClientError
+        # BUG-69 修复（2026-08-22）：OTSClientError → OTSError（SDK 条件写失败
+        # 抛 OTSServiceError，属 OTSError 子类，需基类捕获）
+        from tablestore import OTSError
 
         sid = record.get("sample_id")
         if sid is None:
@@ -490,11 +492,15 @@ class TablestoreRepository(TablestoreBase):
             "recorded_at": record.get("recorded_at"),
         }
         # B1 修复（2026-08-13）：EXPECT_NOT_EXIST 条件写——主键已存在（sample_id 撞）
-        # 抛 OTSClientError 而非覆盖，杜绝并发写入静默丢数据。
+        # 抛 SDK 条件冲突异常而非覆盖，杜绝并发写入静默丢数据。
+        # BUG-69 修复（2026-08-22）：except 从 OTSClientError 扩为 SDK 异常基类
+        # OTSError——SDK 6.4.8 条件写失败（主键已存在 → ConditionCheckFail）抛的是
+        # OTSServiceError 而非 OTSClientError，此前漏捕 → 撞主键不转 CONFLICT 而
+        # 冒泡成 INTERNAL_ERROR（与 care/storage 同源漏捕）。
         try:
             self._put_row_not_exist(TABLE_LABS_STORE,
                                     self._pk_lab(record["patient_id"], sid), attrs)
-        except OTSClientError as exc:
+        except OTSError as exc:
             # LOW-6（2026-08-15）：直接捕获 SDK 异常类（此前 `except Exception` +
             # `type(exc).__name__ == "OTSClientError"` 字符串比对——类名若变即失效）。
             # SDK 条件不满足抛 OTSClientError；统一转成**业务冲突异常**（九审，
