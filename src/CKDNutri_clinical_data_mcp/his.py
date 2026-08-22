@@ -191,7 +191,7 @@ def _load_guardian_tokens() -> dict[str, Any]:
             if raw is None:
                 continue
             try:
-                datetime.fromisoformat(str(raw))
+                datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             except ValueError as exc:
                 raise RuntimeError(
                     f"监护人令牌库 {GUARDIAN_TOKEN_STORE} 条目 {pid} {tkey}={raw!r} "
@@ -313,7 +313,7 @@ def issue_guardian_token(patient_id: str) -> dict[str, Any]:
             prev_issued = prev.get("issued_at")
             if prev_issued:
                 try:
-                    prev_dt = datetime.fromisoformat(str(prev_issued))
+                    prev_dt = datetime.fromisoformat(str(prev_issued).replace("Z", "+00:00"))
                     if prev_dt.tzinfo is None:
                         prev_dt = prev_dt.replace(tzinfo=timezone.utc)
                     if (now - prev_dt).total_seconds() < 60:
@@ -443,7 +443,7 @@ def _token_expired(expires_at: Any, now: datetime) -> bool:
     无法解析一律视为过期（fail-closed）。
     """
     try:
-        parsed = datetime.fromisoformat(str(expires_at or ""))
+        parsed = datetime.fromisoformat(str(expires_at or "").replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return now > parsed
