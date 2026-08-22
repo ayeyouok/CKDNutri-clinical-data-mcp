@@ -144,6 +144,22 @@ class FakeOtsClient:
                     raise OTSClientError("Condition check failed: row already exists")
         self.tables[table][key] = attrs
 
+    def update_row(self, table: str, row, condition=None) -> None:
+        """模拟 SDK UpdateRow 增量更新语义（BUG-70，2026-08-22）。
+
+        UpdateRow 只更新请求中出现的列，**不删除**其他列（区别于 put_row 整行覆盖）。
+        属性列三元组 (name, UpdateType.PUT, value) 中的操作类型忽略（Fake 仅支持 PUT）。
+        """
+        key = tuple(v for _, v in row.primary_key)
+        attrs = dict(self.tables[table].get(key, {}))
+        for col in row.attribute_columns:
+            # 三元组 (name, op, value) 或 (name, value)
+            if len(col) >= 3:
+                attrs[col[0]] = col[2]
+            else:
+                attrs[col[0]] = col[1]
+        self.tables[table][key] = attrs
+
     def delete_row(self, table: str, row, condition) -> None:
         key = tuple(v for _, v in row.primary_key)
         self.tables[table].pop(key, None)
